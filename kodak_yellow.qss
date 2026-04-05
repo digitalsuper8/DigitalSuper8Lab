@@ -1,0 +1,184 @@
+/* ===== Base ===== */
+QWidget {
+  background: #FFD232;           /* Kodak warm yellow */
+  color: #111111;
+  font-size: 10pt;
+}
+
+/* Make panels readable on yellow */
+QGroupBox {
+  background: #FFE16E;           /* lighter panel yellow */
+  border: 2px solid #0A5A96;     /* Kodak blue */
+  border-radius: 8px;
+  margin-top: 18px;              /* space for title */
+  padding: 8px;
+}
+QGroupBox::title {
+  subcontrol-origin: margin;
+  subcontrol-position: top left;
+  padding: 2px 6px;
+  color: #0A5A96;                /* Kodak blue */
+  font-weight: 600;
+}
+
+/* Labels */
+QLabel {
+  color: #111111;
+}
+
+/* ===== Menu & Status ===== */
+QMenuBar {
+  background: #B80000;           /* Kodak red */
+  color: #FFFFFF;
+}
+QMenuBar::item {
+  background: transparent;
+  padding: 4px 8px;
+}
+QMenuBar::item:selected {
+  background: rgba(255,255,255,0.15);
+}
+QMenu {
+  background: #FFF4B6;
+  border: 1px solid #0A5A96;
+}
+QMenu::item:selected {
+  background: #FFE16E;
+}
+
+QStatusBar {
+  background: #FFE16E;
+  color: #111111;
+}
+
+/* ===== Buttons ===== */
+QPushButton {
+  background: #0A5A96;           /* Kodak blue */
+  color: #FFFFFF;
+  border: 2px solid #082F4D;
+  border-radius: 8px;
+  padding: 6px 12px;
+}
+QPushButton:hover {
+  background: #0C6FBF;
+}
+QPushButton:pressed {
+  background: #084A79;
+}
+
+/* Make the Close button “danger” (objectName = pushButton_4 in your .ui) */
+#pushButton_4 {
+  background: #B80000;           /* Kodak red */
+  border-color: #7A0000;
+}
+#pushButton_4:hover { background: #D00000; }
+#pushButton_4:pressed { background: #8E0000; }
+
+/* ===== Sliders ===== */
+QSlider::groove:horizontal {
+  height: 8px;
+  background: #F2D467;           /* muted bar on yellow */
+  border: 1px solid #0A5A96;
+  border-radius: 4px;
+}
+QSlider::handle:horizontal {
+  width: 18px;
+  background: #0A5A96;           /* Kodak blue knob */
+  border: 2px solid #082F4D;
+  margin: -6px 0;                /* center knob vertically */
+  border-radius: 9px;
+}
+QSlider::sub-page:horizontal {    /* “filled” portion */
+  background: #0A5A96;           /* blue fill */
+  border: 1px solid #0A5A96;
+  border-radius: 4px;
+}
+QSlider::add-page:horizontal {
+  background: transparent;
+}
+
+/* ===== Spin/Combo ===== */
+QSpinBox, QDoubleSpinBox, QComboBox, QLineEdit {
+  background: #FFFFFF;
+  color: #111111;
+  border: 2px solid #0A5A96;
+  border-radius: 6px;
+  padding: 2px 6px;
+}
+QComboBox::drop-down {
+  width: 22px;
+  border-left: 1px solid #0A5A96;
+}
+QComboBox::down-arrow {
+  image: none;
+  width: 0; height: 0;
+  border-left: 6px solid transparent;
+  border-right: 6px solid transparent;
+  border-top: 8px solid #0A5A96; /* blue triangle */
+  margin: 0 8px;
+}
+
+/* ===== Check/Radio ===== */
+QCheckBox, QRadioButton { spacing: 6px; }
+QCheckBox::indicator, QRadioButton::indicator {
+  width: 18px; height: 18px;
+}
+QCheckBox::indicator {
+  border: 2px solid #0A5A96; border-radius: 4px; background: #FFFFFF;
+}
+QCheckBox::indicator:checked {
+  background: #0A5A96;          /* blue check */
+  image: none;
+}
+QRadioButton::indicator {
+  border: 2px solid #0A5A96; border-radius: 9px; background: #FFFFFF;
+}
+QRadioButton::indicator:checked {
+  background: radial-gradient(#0A5A96, #0A5A96);
+}
+
+/* ===== Progress ===== */
+QProgressBar {
+  background: #FFF4B6;
+  border: 2px solid #0A5A96;
+  border-radius: 6px;
+  text-align: center;
+  color: #111111;
+}
+QProgressBar::chunk {
+  background: #B80000;          /* Kodak red chunk */
+  margin: 1px;
+  border-radius: 4px;
+}
+
+/* ===== Scrollbars (simple) ===== */
+QScrollBar:horizontal, QScrollBar:vertical {
+  background: #FFE16E;
+  border: 1px solid #0A5A96;
+}
+QScrollBar::handle:horizontal, QScrollBar::handle:vertical {
+  background: #0A5A96;
+  min-width: 24px; min-height: 24px;
+}
+
+/* Make the status bar distinct and keep the Kodak-style warm tone */
+QStatusBar {
+    background-color: #f6e7b0;     /* soft yellow-beige, fits "Kodak" theme */
+    border-top: 1px solid #d1c271; /* subtle top edge */
+    padding: 2px;
+}
+
+/* Keep messages readable */
+QStatusBar QLabel {
+    color: #000;                   /* black text for good contrast */
+    font-weight: 500;
+}
+
+/* Emphasize the corner grip */
+QSizeGrip {
+    width: 12px;
+    height: 12px;
+    background: transparent;
+    image: url(:/icons/sizegrip.png);  /* optional custom diagonal lines icon */
+}
+

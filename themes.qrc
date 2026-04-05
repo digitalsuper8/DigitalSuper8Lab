@@ -1,0 +1,6 @@
+<RCC>
+  <qresource prefix="/themes">
+    <file>kodak_yellow.qss</file>
+    <file>kodak_dark.qss</file>
+  </qresource>
+</RCC>
