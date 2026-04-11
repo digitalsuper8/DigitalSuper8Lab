@@ -174,7 +174,7 @@
     </rect>
    </property>
    <property name="text">
-    <string>Write to USB</string>
+    <string>Add audio to video</string>
    </property>
   </widget>
   <widget class="QLabel" name="TitleLabel">

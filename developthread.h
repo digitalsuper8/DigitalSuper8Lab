@@ -1,4 +1,3 @@
-// developthread.h
 #ifndef DEVELOPTHREAD_H
 #define DEVELOPTHREAD_H
 #include "super8devparams.h"
@@ -6,6 +5,7 @@
 #include <QObject>
 #include <QTimer>
 #include <QElapsedTimer>
+#include <QString>
 #include <atomic>
 #include <opencv2/core.hpp>
 #include <QPointer>
@@ -15,16 +15,16 @@
 struct LeakBurstState
 {
     bool active = false;
-    int  phaseFrame = 0;          // counts frames since burst start
+    int  phaseFrame = 0;
     int  rampUp = 5;
     int  hold  = 5;
     int  rampDown = 5;
 
-    int  side = 0;                // 0=left, 1=right
-    float bandCenter = 0.f;       // 0..1
-    float bandWidth  = 0.f;       // 0..1
-    float sigmaBloom = 0.f;       // blur amount
-    float strengthMul = 1.f;      // random strength multiplier
+    int  side = 0;
+    float bandCenter = 0.f;
+    float bandWidth  = 0.f;
+    float sigmaBloom = 0.f;
+    float strengthMul = 1.f;
 
     std::chrono::steady_clock::time_point nextAllowed;
 };
@@ -36,30 +36,29 @@ public:
     explicit DevelopThread(QObject* parent = nullptr);
 
     enum class LogMode {
-        Linear = 0,   // geen log, gewoon ACEScg-linear
-        Log16  = 1,    // jouw bestaande LOG16 LUT
+        Linear = 0,
+        Log16  = 1,
         ArriLogC3 = 2,
-        ACEScct = 3    // <-- nieuwe log-mode
-        // later: SLog3, LogC, BMD, etc.
+        ACEScct = 3
     };
 
     enum class ToneCurveMode {
         None        = 0,
-        SCurves     = 1,  // jouw filmlook S-curves
+        SCurves     = 1,
         FilmicHable = 2,
         Reinhard    = 3,
-        ACESLike    = 4   // jouw bestaande applyACES
+        ACESLike    = 4
     };
+
     enum class GradingMode
     {
         ACES = 0,
         Log  = 1
     };
 
-
     ~DevelopThread();
 
-    // Public state (kept from your original API)
+    // Public state
     int baseCurveMode = 0;
     int width = 0;
     int height = 0;
@@ -69,13 +68,22 @@ public:
     int codec = 0;
     int first_frame = 1;
 
+    // Audio / mux options
+    bool addAudio = false;
+    bool muxAudioIntoVideo = false;
+    QString ffmpegProgram = QStringLiteral("ffmpeg");
+
+    QString lastRenderedVideoPath;
+    QString lastRenderedWavPath;
+    QString lastMuxedVideoPath;
+
     float Red = 1.f, Blue = 1.f, Green = 1.f;
     float Sat = 100.f, Contrast = 100.f, Bright = 0.f;
 
     cv::Mat imgBGR;
     int bitdepth = 16;
     bool HDR = false, filmlook = true, gammacorrect = false;
-    bool useLog = false;   // NEW: enable / disable S-Log-style LUT
+    bool useLog = false;
     char work_path[256] = {};
     char file_type[256] = "mp4";
     bool ImageDeveloped = false;
@@ -86,8 +94,7 @@ public:
     cv::Mat lut8_array, lutS_array;
     bool processingBusy_ = false;
     bool renderingBusy = false;
-    float ExposureEV = 0.f;   // 0 = no change, +1 = +1 stop, etc.
-
+    float ExposureEV = 0.f;
 
 signals:
     void sCurvesUpdated(QVector<quint16> r, QVector<quint16> g, QVector<quint16> b);
@@ -96,18 +103,16 @@ signals:
     void playbackStarted();
     void playbackPaused();
     void playbackStopped();
-    void renderFinished();          // emitted when render loop ends (or cancels)
+    void renderFinished();
 
 public slots:
     void setSuper8DevParams(const Super8DevParams &p);
     void setLogMode(int mode);
     void setToneCurveMode(int mode);
     void setGradingMode(int mode);
-    void setSCurvePivot(int value);  // 0..100 from UI
-    // lifecycle/init in worker thread
-    void init();                    // creates timer in the worker thread
+    void setSCurvePivot(int value);
+    void init();
 
-    // playback controls (queued from UI thread)
     void setFps(double fps);
     void setRange(int first, int last);
     void setLooping(bool enabled);
@@ -116,28 +121,26 @@ public slots:
     void stop();
     void seek(int index);
 
-    // render-to-file (queued from dialog/UI thread)
     void startRenderToFile();
     void cancelRender();
 
-    // processing
     void onDevelopFrame(int i);
     void calc_LutCurve();
 
 private slots:
-    void onTick();                  // playback timer tick
+    void onTick();
 
 private:
     cv::RNG m_rng;
- int m_currentFrameIndex = 0;
+    int m_currentFrameIndex = 0;
     float m_prevLeakSlider = 0.0f;
     LeakBurstState m_leakBurst;
 
     LogMode       m_logMode       = LogMode::Linear;
     ToneCurveMode m_toneCurveMode = ToneCurveMode::SCurves;
-    GradingMode m_gradingMode = GradingMode::ACES;
+    GradingMode   m_gradingMode   = GradingMode::ACES;
     float m_sCurvePivot = -1.0f;
-    // playback state
+
     QPointer<QTimer> timer_;
     QElapsedTimer wallClock_;
     double playbackFps_ = 24.0;
@@ -146,10 +149,8 @@ private:
     int current_    = 1;
     bool looping_   = true;
 
-    // render cancel flag
     std::atomic<bool> cancelRequested_{false};
 
-    // helpers
     void startPlaybackTimer();
     void stopPlaybackTimer();
 

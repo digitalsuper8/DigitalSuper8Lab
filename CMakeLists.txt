@@ -44,6 +44,13 @@ add_executable(${PROJECT_NAME} ${SOURCES}
   collapsiblepanel.h collapsiblepanel.cpp
   super8devparams.h)
 
+target_sources(DigitalSuper8Lab PRIVATE
+    ds8audioprocessor.cpp
+    ds8videomuxer.cpp
+    ds8audioprocessor.h
+    ds8videomuxer.h
+)
+
 target_link_libraries(${PROJECT_NAME}
     PRIVATE
         Qt6::Widgets

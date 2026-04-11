@@ -16,6 +16,11 @@
 //#include <opencv2/photo.hpp>
 
 #include "processing.h"
+#include "ds8audioprocessor.h"
+#include "ds8videomuxer.h"
+
+#include <QFileInfo>
+#include <QDir>
 
 using namespace cv;
 using namespace std;
@@ -562,10 +567,15 @@ void DevelopThread::seek(int index)
 
 void DevelopThread::startRenderToFile()
 {
+    qDebug() << "[AUDIO TEST] patched startRenderToFile entered. addAudio =" << addAudio
+             << "muxAudioIntoVideo =" << muxAudioIntoVideo
+             << "work_path =" << work_path
+             << "roll =" << Roll
+             << "first_frame =" << first_frame
+             << "frames =" << frames;
     renderingBusy = true;
     cancelRequested_.store(false, std::memory_order_relaxed);
 
-    // Normalize size as your original code
     if ((height == 720) || (height == 480)) {
         height = 1080;
         width  = 1440;
@@ -577,19 +587,24 @@ void DevelopThread::startRenderToFile()
                   "C:/Users/patri/Videos/XiCapture_old/DigitalSuper8_output/Super8mpg%02d.%s",
                   Roll, file_type);
 
+    const QString videoPath = QString::fromLocal8Bit(vid_name);
+
     cv::VideoWriter w;
     if (!w.open(vid_name, codec, fps, S, true)) {
         emit StatusUpdate("Could not open the output video for write.", true);
-        renderingBusy = false;              // make sure we reset this on failure
+        renderingBusy = false;
         return;
     }
 
     emit StatusUpdate("Developing film, please wait.", false);
 
     cv::Mat HDimage;
+    bool cancelled = false;
+
     for (int i = first_frame; i <= frames; ++i) {
         if (cancelRequested_.load(std::memory_order_relaxed)) {
             emit StatusUpdate("Render cancelled.", true);
+            cancelled = true;
             break;
         }
 
@@ -597,19 +612,16 @@ void DevelopThread::startRenderToFile()
         if (!ImageDeveloped)
             continue;
 
-        // --- Always feed 8-bit BGR to VideoWriter ---
         cv::Mat frameOut;
 
         if (imgBGR.depth() == CV_16U) {
-            // 12-bit data in 16-bit container (0..4095) → 0..255
             imgBGR.convertTo(frameOut, CV_8UC3, 255.0 / 4095.0, 0.0);
 
-            // If you want gamma on the video as well, mirror the behavior:
-            if (gammacorrect) {
-                frameOut = correctGamma(frameOut, 1.0 / 2.2);
-            }
+            // Keep this disabled unless correctGamma is declared in a shared header.
+            // if (gammacorrect) {
+            //     frameOut = correctGamma(frameOut, 1.0 / 2.2);
+            // }
         } else {
-            // already 8-bit
             frameOut = imgBGR;
         }
 
@@ -621,12 +633,83 @@ void DevelopThread::startRenderToFile()
         }
     }
 
+    w.release();
+
+    if (cancelled) {
+        renderingBusy = false;
+        emit renderFinished();
+        return;
+    }
+
+    lastRenderedVideoPath = videoPath;
+    lastRenderedWavPath.clear();
+    lastMuxedVideoPath.clear();
+
+    if (addAudio)
+    {
+        emit StatusUpdate("Building stretched WAV from PCM files...", false);
+
+        QFileInfo vfi(videoPath);
+        const QString baseName = vfi.completeBaseName();
+        const QString outDir   = vfi.absolutePath();
+
+        const QString wavPath =
+            QStringLiteral("%1/%2_audio.wav").arg(outDir, baseName);
+
+        const auto wavResult = DS8AudioProcessor::buildStretchedWavForRoll(
+            QString::fromLocal8Bit(work_path),
+            Roll,
+            first_frame,
+            frames,
+            fps,
+            wavPath
+            );
+
+        if (!wavResult.ok) {
+            emit StatusUpdate(QStringLiteral("Video ready, but WAV failed: %1").arg(wavResult.error), true);
+        } else {
+            lastRenderedWavPath = wavResult.wavPath;
+
+            emit StatusUpdate(QStringLiteral("WAV created: %1")
+                                  .arg(QFileInfo(wavResult.wavPath).fileName()),
+                              false);
+
+            if (muxAudioIntoVideo)
+            {
+                emit StatusUpdate("Muxing audio into rendered video...", false);
+
+                const QString muxedVideoPath =
+                    QStringLiteral("%1/%2_with_audio.%3")
+                        .arg(outDir, baseName, vfi.suffix());
+
+                const auto muxResult = DS8VideoMuxer::muxAudioIntoVideo(
+                    videoPath,
+                    wavResult.wavPath,
+                    muxedVideoPath,
+                    ffmpegProgram
+                    );
+
+                if (!muxResult.ok) {
+                    emit StatusUpdate(QStringLiteral("WAV created, but mux failed: %1").arg(muxResult.error), true);
+                    qDebug().noquote() << "[MUX] Failed. stderr was:\n" << muxResult.stdErr;
+                    qDebug().noquote() << "[MUX] Failed. stdout was:\n" << muxResult.stdOut;
+                    emit StatusUpdate(QStringLiteral("WAV created, but mux failed. See Application Output.\n%1")
+                                          .arg(muxResult.error),
+                                      true);
+                } else {
+                    lastMuxedVideoPath = muxResult.outputPath;
+                    emit StatusUpdate(QStringLiteral("Video + audio ready: %1")
+                                          .arg(QFileInfo(muxResult.outputPath).fileName()),
+                                      false);
+                }
+            }
+        }
+    }
+
     emit StatusUpdate("Status OK, waiting...", false);
     emit renderFinished();
-    w.release();
     renderingBusy = false;
 }
-
 
 void DevelopThread::cancelRender()
 {

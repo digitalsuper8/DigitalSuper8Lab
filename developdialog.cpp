@@ -19,6 +19,17 @@ DevelopDialog::DevelopDialog(QWidget *parent) :
     cod = 1;            // RAW (IYUV) by default
     currentframe = false;
 
+    // Make visible UI match defaults
+    ui->spinBox->setValue(18);
+    ui->RAWcheckBox->setChecked(true);
+    ui->MPEGcheckBox->setChecked(false);
+    ui->CurrentFrameBox->setChecked(false);
+    ui->Number_of_Frames->setValue(0);
+
+    // Reuse existing checkbox for audio feature
+    ui->checkBox_4->setText(QStringLiteral("Add audio to video"));
+    ui->checkBox_4->setChecked(true);
+
     // OK button already wired in .ui to accept()
     connect(this, &QDialog::accepted, this, &DevelopDialog::onDialogAccepted);
 }
@@ -62,7 +73,7 @@ void DevelopDialog::on_MPEGcheckBox_clicked(bool checked)
 void DevelopDialog::on_RAWcheckBox_clicked(bool checked)
 {
     if (checked) {
-        cod = 1; // IYUV (AVI)
+        cod = 1; // IYUV (RAW-like)
         qDebug() << "Codec set to IYUV (RAW-like)";
     }
 }
@@ -77,31 +88,50 @@ void DevelopDialog::onDialogAccepted()
     const int  uiFps       = ui->spinBox->value();
     const bool fromCurrent = ui->CurrentFrameBox->isChecked();
 
-    int fourcc      = (cod == 2) ? cv::VideoWriter::fourcc('M','P','4','V')
-                            : cv::VideoWriter::fourcc('I','Y','U','V');
+    int fourcc = (cod == 2)
+                     ? cv::VideoWriter::fourcc('M','P','4','V')
+                     : cv::VideoWriter::fourcc('I','Y','U','V');
+
     const char* extC = (cod == 2) ? "mp4" : "avi";
 
     int firstIndex = fromCurrent ? currentFrameIndex : 1;
     if (firstIndex < 1) firstIndex = 1;
+
     int lastIndex  = (lastFrameIndex > 0) ? lastFrameIndex : firstIndex;
 
-    // Make locals; DO NOT capture 'this'
-    DevelopThread* worker = dev;                 // stable pointer owned by Processing
+    // Optional frame count limit from dialog
+    int requestedCount = ui->Number_of_Frames->value();
+    if (requestedCount > 0) {
+        int limitedLast = firstIndex + requestedCount - 1;
+        if (limitedLast < lastIndex)
+            lastIndex = limitedLast;
+    }
+
+    const bool addAudio = ui->checkBox_4->isChecked();
+    const bool muxAudio = addAudio; // one checkbox: generate WAV + mux into final video
+
+    DevelopThread* worker = dev;
     const int      fpsVal = uiFps;
     const int      fourccVal = fourcc;
     const QString  ext = QString::fromLatin1(extC);
     const int      firstVal = firstIndex;
     const int      lastVal  = lastIndex;
+    const bool     addAudioVal = addAudio;
+    const bool     muxAudioVal = muxAudio;
 
     QMetaObject::invokeMethod(
         worker,
-        [worker, fpsVal, fourccVal, ext, firstVal, lastVal]() {
+        [worker, fpsVal, fourccVal, ext, firstVal, lastVal, addAudioVal, muxAudioVal]() {
             worker->fps         = fpsVal;
             worker->codec       = fourccVal;
             std::snprintf(worker->file_type, sizeof(worker->file_type),
                           "%s", ext.toLatin1().constData());
             worker->first_frame = firstVal;
             worker->frames      = lastVal;
+
+            worker->addAudio = addAudioVal;
+            worker->muxAudioIntoVideo = muxAudioVal;
+            worker->ffmpegProgram = QStringLiteral("ffmpeg");
 
             worker->startRenderToFile();
         },
@@ -110,4 +140,3 @@ void DevelopDialog::onDialogAccepted()
 
     emit StatusUpdate(QStringLiteral("Starting development to file..."));
 }
-
