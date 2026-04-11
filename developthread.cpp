@@ -573,6 +573,7 @@ void DevelopThread::startRenderToFile()
              << "roll =" << Roll
              << "first_frame =" << first_frame
              << "frames =" << frames;
+
     renderingBusy = true;
     cancelRequested_.store(false, std::memory_order_relaxed);
 
@@ -612,15 +613,10 @@ void DevelopThread::startRenderToFile()
         if (!ImageDeveloped)
             continue;
 
+        // Always feed 8-bit BGR to VideoWriter
         cv::Mat frameOut;
-
         if (imgBGR.depth() == CV_16U) {
-            imgBGR.convertTo(frameOut, CV_8UC3, 255.0 / 4095.0, 0.0);
-
-            // Keep this disabled unless correctGamma is declared in a shared header.
-            // if (gammacorrect) {
-            //     frameOut = correctGamma(frameOut, 1.0 / 2.2);
-            // }
+            imgBGR.convertTo(frameOut, CV_8UC3, 1.0 / 257.0);
         } else {
             frameOut = imgBGR;
         }
@@ -763,9 +759,6 @@ void DevelopThread::onDevelopFrame(int i)
     {
         ImageDeveloped = false;
 
-        // ----------------------------------------------------------
-        // 0. Load RAW Bayer
-        // ----------------------------------------------------------
         char in_name[256];
         std::snprintf(in_name, sizeof(in_name),
                       "%s/images%d/XiCapture%03d.pgm", work_path, Roll, i);
@@ -778,218 +771,133 @@ void DevelopThread::onDevelopFrame(int i)
         }
 
         // ----------------------------------------------------------
-        // 1. Debayer → CameraRGB (linear integer)
+        // 1) Exposure on RAW Bayer before demosaic
         // ----------------------------------------------------------
-        cv::Mat imgCamRGB;
-        cv::cvtColor(imgBAY, imgCamRGB, cv::COLOR_BayerGB2BGR);
-
-        const bool rawWas16Bit = (imgCamRGB.depth() == CV_16U);
-
-        // ----------------------------------------------------------
-        // 2. Normalize to linear float [0..1]
-        // ----------------------------------------------------------
-        cv::Mat linearCam;
-        if (rawWas16Bit)
-            imgCamRGB.convertTo(linearCam, CV_32FC3, 1.0f / 4095.0f);
-        else
-            imgCamRGB.convertTo(linearCam, CV_32FC3, 1.0f / 255.0f);
-
-        // ----------------------------------------------------------
-        // 3. Apply exposure in linear light
-        // ----------------------------------------------------------
-        if (std::abs(ExposureEV) > 1e-4)
+        cv::Mat exposedBayer;
+        if (std::abs(ExposureEV) > 1e-4f)
         {
-            float g = std::pow(2.0f, ExposureEV);
-            linearCam *= g;
-        }
+            const double gain = std::pow(2.0, static_cast<double>(ExposureEV));
 
-        // ----------------------------------------------------------
-        // 4. White balance (per-channel scaling)
-        // ----------------------------------------------------------
-        // (You can refine these, but this works well)
-        // Voor nu neutraal (1,1,1); later kun je dit koppelen aan sliders.
-        const float wbR = 1.0f;
-        const float wbG = 1.0f;
-        const float wbB = 1.0f;
-        applyWhiteBalance(linearCam, wbR, wbG, wbB);
-
-        // ----------------------------------------------------------
-        // 5. Mini-IDT: CameraRGB → sRGB → ACEScg
-        // ----------------------------------------------------------
-
-        // 5a. Apply your camera CCM (diagonal)
-        static const cv::Matx33f kCCM(
-            1.264223f, 0.0f,      0.0f,
-            0.0f,      0.830212f, 0.0f,
-            0.0f,      0.0f,      0.995531f
-            );
-        applyColorMatrix(linearCam, kCCM);
-
-        // 5b. sRGB primaries → ACEScg primaries
-        cv::Mat acesCG;
-        linearCam.copyTo(acesCG);
-      //  applySRGBtoACEScg(acesCG);
-       //
-        clamp01(acesCG);
-
-        // ----------------------------------------------------------
-        // 6+. Grading branches: ACES mode vs LOG mode
-        //     Common input: acesCG  (linear AP1 / "ACEScg-like")
-        // ----------------------------------------------------------
-        cv::Mat displayFloat;   // final float image in display space [0..1]
-
-        if (m_gradingMode == GradingMode::ACES)
-        {
-            // ===========================
-            //  ACES grading mode
-            //  Camera → ACEScg (linear) → ACEScct → grading → RRT+ODT 709
-            // ===========================
-
-            // First move to ACEScg:
-            applySRGBtoACEScg(acesCG);
-            clamp01(acesCG);
-
-            // 6A. Linear ACEScg → ACEScct (log grading space)
-            cv::Mat acesCct;
-            applyACEScct(acesCG, acesCct);   // our log-ish ACEScct helper
-
-          //  clamp01(acesCct);
-
-            // 7A. Creative grading in ACEScct:
-            //     For ACES mode we KEEP THIS SIMPLE:
-            //       - only SCurves (if enabled)
-            //       - then Bright/Contrast/Sat/RGB gains
-            cv::Mat graded = acesCct.clone();
-
-            if (m_toneCurveMode == ToneCurveMode::SCurves)
-            {
-                applySCurvesFloat(graded,
-                                  lutSCurveRed,
-                                  lutSCurveGreen,
-                                  lutSCurveBlue);
-            }
-            // Ignore FilmicHable/Reinhard/ACESLike in ACES mode to avoid double
-            // tone-mapping; RRT+ODT is our only output transform here.
-
-            clamp01(graded);
-
-            // 8A. Local adjustments (still in ACEScct space)
-            applyBrightnessContrast(graded, Contrast, Bright);
-            applySaturation(graded, Sat);
-            applyChannelGains(graded, Blue, Green, Red);
-
-            clamp01(graded);
-
-            // NOTE:
-            // A "perfect" ACES pipeline would now convert ACEScct → ACEScg (linear)
-            // before RRT+ODT. Our RRT+ODT implementation already behaves like an
-            // artistic filmic curve, so we can feed graded directly for now.
-
-            // 9A. RRT + ODT Rec709 – ONLY in ACES mode
-            cv::Mat out709;
-            applyRRT_ODT_Rec709(graded, out709);
-
-            clamp01(out709);
-            displayFloat = out709;
+            if (imgBAY.depth() == CV_16U)
+                imgBAY.convertTo(exposedBayer, CV_16U, gain, 0.0);
+            else
+                imgBAY.convertTo(exposedBayer, CV_8U, gain, 0.0);
         }
         else
         {
-            // ===========================
-            //  LOG grading mode (S-Log / LOG16)
-            //  Camera → ACEScg (linear) → LOG16 → grading → display-ish
-            // ===========================
-
-            cv::Mat graded = acesCG.clone();
-
-            if (m_logMode == LogMode::Log16){
-
-            // 6B. Linear ACEScg → LOG16 (S-Log style)
-            cv::Mat tmp16;
-            graded.convertTo(tmp16, CV_16UC3, 4095.0f);
-            tmp16 = LOG16(tmp16, lut16);        // your existing S-Log LUT
-           // cv::Mat logBase;
-           // tmp16.convertTo(logBase, CV_32FC3, 1.0f / 4095.0f);
-            tmp16.convertTo(graded, CV_32FC3, 1.0f / 4095.0f);
-            clamp01(graded);
-            }
-
-            if (m_logMode == LogMode::ArriLogC3){
-                applyLogC3(acesCG, graded);
-            }
-
-            // 7B. Tone curves in LOG space
-           // cv::Mat graded = logBase.clone();
-
-            switch (m_toneCurveMode)
-            {
-            case ToneCurveMode::SCurves:
-                applySCurvesFloat(graded,
-                                  lutSCurveRed,
-                                  lutSCurveGreen,
-                                  lutSCurveBlue);
-                break;
-
-            case ToneCurveMode::FilmicHable:
-                applyFilmicHable(graded);
-                break;
-
-            case ToneCurveMode::Reinhard:
-                applyReinhardGamma(graded, 2.2f);
-                break;
-
-            case ToneCurveMode::ACESLike:
-                // ACES-like curve as an ALTERNATIVE to SCurves in LOG mode
-                applyACES(graded);
-                break;
-
-            case ToneCurveMode::None:
-            default:
-                break;
-            }
-
-            clamp01(graded);
-
-            // 8B. Local adjustments in LOG space
-            applyBrightnessContrast(graded, Contrast, Bright);
-            applySaturation(graded, Sat);
-            applyChannelGains(graded, Blue, Green, Red);
-
-            clamp01(graded);
-
-            // 9B. No ACES RRT+ODT here!
-            //     In LOG mode, tone curve + SCurves already serve as the
-            //     "display look". You *avoid* double tonemapping.
-            //     If needed later, you can add a very soft gamma here.
-            displayFloat = graded;
+            exposedBayer = imgBAY;
         }
 
         // ----------------------------------------------------------
-        // 10. Convert to 8/16 bit for display/output
+        // 2) Preview-style base path
+        //    12/16-bit Bayer -> 8-bit Bayer first, just like previewthread
         // ----------------------------------------------------------
-        if (bitdepth == 16)
-            displayFloat.convertTo(imgBGR, CV_16UC3, 4095.0f);
+        cv::Mat bayer8;
+        if (exposedBayer.depth() == CV_16U)
+        {
+            // 12-bit data in 16-bit container -> 8-bit display domain
+            exposedBayer.convertTo(bayer8, CV_8UC1, (1.0 / 16.0));
+        }
         else
-            displayFloat.convertTo(imgBGR, CV_8UC3, 255.0f);
+        {
+            exposedBayer.convertTo(bayer8, CV_8UC1);
+        }
 
         // ----------------------------------------------------------
-        // 11. Flip & publish
+        // 3) Demosaic
         // ----------------------------------------------------------
-        cv::flip(imgBGR, imgBGR, -1);
+        cv::Mat img8;
+        cv::cvtColor(bayer8, img8, cv::COLOR_BayerGB2BGR, 3);
 
+        // ----------------------------------------------------------
+        // 4) Flip to match previewthread / cartridge orientation
+        // ----------------------------------------------------------
+        cv::flip(img8, img8, -1);
+
+        // ----------------------------------------------------------
+        // 5) Base S-Log-ish look + sigmoid curve
+        // ----------------------------------------------------------
+        cv::LUT(img8, lut8_array, img8);
+        cv::LUT(img8, lutS_array, img8);
+
+        // ----------------------------------------------------------
+        // 6) Optional extra user S-curves
+        // ----------------------------------------------------------
+        if (filmlook)
+        {
+            cv::Mat f32;
+            img8.convertTo(f32, CV_32FC3, 1.0 / 255.0);
+
+            applySCurvesFloat(f32,
+                              lutSCurveRed,
+                              lutSCurveGreen,
+                              lutSCurveBlue);
+
+            cv::max(f32, 0.0f, f32);
+            cv::min(f32, 1.0f, f32);
+
+            f32.convertTo(img8, CV_8UC3, 255.0);
+        }
+
+        // ----------------------------------------------------------
+        // 7) Brightness / Saturation / Contrast in HSV
+        // ----------------------------------------------------------
+        {
+            cv::Mat imgHSV;
+            std::vector<cv::Mat> channels;
+
+            cv::cvtColor(img8, imgHSV, cv::COLOR_BGR2HSV);
+            cv::split(imgHSV, channels);
+
+            channels[2].convertTo(channels[2], -1, (Contrast / 100.0), Bright);
+            channels[1].convertTo(channels[1], -1, (Sat / 100.0), 0.0);
+
+            cv::merge(channels, imgHSV);
+            cv::cvtColor(imgHSV, img8, cv::COLOR_HSV2BGR);
+        }
+
+        // ----------------------------------------------------------
+        // 8) RGB gain trim
+        // ----------------------------------------------------------
+        {
+            std::vector<cv::Mat> channels;
+            cv::split(img8, channels); // B, G, R
+
+            channels[0].convertTo(channels[0], -1, Blue,  0.0);
+            channels[1].convertTo(channels[1], -1, Green, 0.0);
+            channels[2].convertTo(channels[2], -1, Red,   0.0);
+
+            cv::merge(channels, img8);
+        }
+
+        // ----------------------------------------------------------
+        // 9) Output bit depth
+        // ----------------------------------------------------------
+        if (bitdepth >= 16)
+        {
+            // 8-bit display image packed into 16-bit container for preview/export path
+            img8.convertTo(imgBGR, CV_16UC3, 257.0);
+        }
+        else
+        {
+            imgBGR = img8;
+        }
+
+        // ----------------------------------------------------------
+        // 10) Super 8 development effects (final image domain)
+        // ----------------------------------------------------------
         applySuper8LightLeak(imgBGR);
         applySuper8Grain(imgBGR);
         applyScratches(imgBGR, i);
         applyDust(imgBGR, i);
 
         ImageDeveloped = true;
-
         emit FrameDeveloped(i);
     }
-
     catch (const cv::Exception& e)
     {
         qWarning() << "[DevelopThread] OpenCV EX:" << e.what();
-        return;
+        ImageDeveloped = false;
     }
 }
 

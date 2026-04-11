@@ -307,6 +307,63 @@ Processing::Processing(QWidget *parent) :
     ui->spinBox_RedCurve->setMaximum(64);
     ui->spinBox_GreenCurve->setMaximum(64);
     ui->spinBox_BlueCurve->setMaximum(64);
+
+
+    //NEW to simplify the UI (I added)
+
+    // ----------------------------------------------------------
+    // Simplified DS8Lab mode: hide legacy wide-gamut / multi-mode controls
+    // ----------------------------------------------------------
+    this->setWindowTitle("DS8Lab - Simple Processing");
+
+    ui->comboGradingMode->hide();
+    ui->comboLogMode->hide();
+    ui->comboToneCurve->hide();
+    ui->comboEmulsionLook->hide();
+    ui->GammaCorrectionBox->hide();
+
+
+    ui->SCurveBox->setText("Extra S-Curve");
+    ui->devGroup->setTitle("Simple Development");
+    ui->groupBox->setTitle("Simple Grade");
+    ui->rgbGroup->setTitle("Color Balance");
+    ui->label_11->setText("Simple preview-style processing");
+
+    // Previewthread-like defaults
+    ui->bitDepth->setValue(8);
+
+    ui->Red_Slider->setValue(140);
+    ui->Green_Slider->setValue(100);
+    ui->Blue_Slider->setValue(160);
+
+    ui->Brightness_slider->setValue(-40);
+    ui->Saturation_slider->setValue(250);
+    ui->Contrast_slider->setValue(100);
+    ui->ExposureCombo->setCurrentIndex(4); // 0 EV
+
+    ui->SCurveBox->setChecked(false);
+    ui->spinBox_RedCurve->setValue(8);
+    ui->spinBox_GreenCurve->setValue(8);
+    ui->spinBox_BlueCurve->setValue(8);
+    ui->sliderSCurvePivot->setValue(50);
+
+    devThread->bitdepth = 8;
+    devThread->filmlook = false;
+    devThread->HDR = false;
+    devThread->gammacorrect = false;
+
+    devThread->Red = 1.40f;
+    devThread->Green = 1.00f;
+    devThread->Blue = 1.60f;
+    devThread->Bright = -40.0f;
+    devThread->Sat = 250.0f;
+    devThread->Contrast = 100.0f;
+    devThread->ExposureEV = 0.0f;
+
+    devThread->CurveRed   = ui->spinBox_RedCurve->value();
+    devThread->CurveGreen = ui->spinBox_GreenCurve->value();
+    devThread->CurveBlue  = ui->spinBox_BlueCurve->value();
+    devThread->calc_LutCurve();
     }
 
 Processing::~Processing()
@@ -691,31 +748,18 @@ void Processing::onStatusUpdate(QString str, bool alarm)
     ui->StatusUpdate->setAutoFillBackground(alarm);
 }
 
-void Processing::on_HDR_Develop_clicked(bool checked)
+void Processing::on_HDR_Develop_clicked(bool)
 {
-    if(checked){
-        devThread->HDR = true;
-        qDebug() << "HDR set to TRUE";
-    }
-    else{
-        devThread->HDR = false;
-        qDebug() << "HDR set to FALSE";
-    }
+    // HDR mode is no longer part of the simplified pipeline.
     on_horizontalSlider_3_valueChanged(ImgViewCount);
 }
 
 
 void Processing::on_SCurveBox_clicked(bool checked)
 {
-    if (checked){
-        filmlook = true;
-        devThread->filmlook = true;
-    }
-    else {
-        filmlook = false;
-        devThread->filmlook = false;
-    }
-     on_horizontalSlider_3_valueChanged(ImgViewCount);
+    filmlook = checked;
+    devThread->filmlook = checked;
+    on_horizontalSlider_3_valueChanged(ImgViewCount);
 }
 
 void Processing::on_spinBox_RedCurve_valueChanged(int arg1)
@@ -763,16 +807,10 @@ void Processing::on_SelectDir_Button_clicked()
     qDebug() << work_path;
 }
 
-void Processing::on_GammaCorrectionBox_clicked(bool checked)
+void Processing::on_GammaCorrectionBox_clicked(bool)
 {
-    if (checked){
-        gammacorrect = true;
-        devThread->gammacorrect = true;
-    }
-    else {
-        gammacorrect = false;
-        devThread->gammacorrect = false;
-    }
+    // No separate gamma mode in the simplified pipeline.
+    on_horizontalSlider_3_valueChanged(ImgViewCount);
 }
 
 //Here enter the functions that will be used across the classes
@@ -1111,29 +1149,35 @@ void Processing::on_horizontalSlider_3_sliderReleased()
 
 void Processing::applyEmulsionPreset(const EmulsionPreset &p)
 {
-    // Eventueel signaalblokkering om niet 50x redraw te doen:
-    // QSignalBlocker b1(ui->comboToneCurve); etc. – niet verplicht
-    on_SCurveBox_clicked(true);
     ui->SCurveBox->setChecked(true);
-    ui->comboLogMode->setCurrentIndex(p.toneCurveMode);
 
-    ui->ExposureCombo->setCurrentIndex(p.exposureEV);
-
-    // S-curves – als jouw sliders ints zijn, casten
+    // In the simplified pipeline, the preset only drives look controls.
     ui->spinBox_RedCurve->setValue(static_cast<int>(p.sCurveR));
     ui->spinBox_GreenCurve->setValue(static_cast<int>(p.sCurveG));
     ui->spinBox_BlueCurve->setValue(static_cast<int>(p.sCurveB));
 
-    ui->Brightness_slider->setValue(p.brightness);
-    ui->Contrast_slider->setValue(p.contrast);
-    ui->Saturation_slider->setValue(p.saturation);
+    // exposureEV in your preset is a float, but ExposureCombo uses fixed indices.
+    // Map the common half-stop values back to combo indices.
+    int expIndex = 4; // default 0 EV
+    if      (p.exposureEV <= -1.75f) expIndex = 0;
+    else if (p.exposureEV <= -1.25f) expIndex = 1;
+    else if (p.exposureEV <= -0.75f) expIndex = 2;
+    else if (p.exposureEV <= -0.25f) expIndex = 3;
+    else if (p.exposureEV <=  0.25f) expIndex = 4;
+    else if (p.exposureEV <=  0.75f) expIndex = 5;
+    else if (p.exposureEV <=  1.25f) expIndex = 6;
+    else if (p.exposureEV <=  1.75f) expIndex = 7;
+    else                             expIndex = 8;
 
-    ui->Red_Slider->setValue(p.rGain);
-    ui->Green_Slider->setValue(p.gGain);
-    ui->Blue_Slider->setValue(p.bGain);
+    ui->ExposureCombo->setCurrentIndex(expIndex);
 
-    // Als jouw app daarna normaal gesproken zelf een "settingsChanged" stuurt
-    // naar DevelopThread (bijv. door de valueChanged-signalen), dan is dit genoeg.
+    ui->Brightness_slider->setValue(static_cast<int>(p.brightness));
+    ui->Contrast_slider->setValue(static_cast<int>(p.contrast));
+    ui->Saturation_slider->setValue(static_cast<int>(p.saturation));
+
+    ui->Red_Slider->setValue(static_cast<int>(p.rGain));
+    ui->Green_Slider->setValue(static_cast<int>(p.gGain));
+    ui->Blue_Slider->setValue(static_cast<int>(p.bGain));
 }
 
 void Processing::on_comboEmulsionLook_currentIndexChanged(int index)
@@ -1144,39 +1188,22 @@ void Processing::on_comboEmulsionLook_currentIndexChanged(int index)
     EmulsionPreset p = getEmulsionPreset(look);
     applyEmulsionPreset(p);
 }
-void Processing::onLogModeChanged(int index)
+
+void Processing::onLogModeChanged(int)
 {
-    if (devThread){
-        devThread->setLogMode(index);
-        on_horizontalSlider_3_valueChanged(ImgViewCount);
-        }
+    // Kept for UI compatibility, but no longer switches pipeline branches.
+    on_horizontalSlider_3_valueChanged(ImgViewCount);
 }
 
-void Processing::onToneCurveChanged(int index)
+void Processing::onToneCurveChanged(int)
 {
-    if (devThread){
-        devThread->setToneCurveMode(index);
-        on_horizontalSlider_3_valueChanged(ImgViewCount);
-    }
+    // Kept for UI compatibility, but no longer switches pipeline branches.
+    on_horizontalSlider_3_valueChanged(ImgViewCount);
 }
 
-void Processing::on_comboGradingMode_currentIndexChanged(int index)
+void Processing::on_comboGradingMode_currentIndexChanged(int)
 {
-    if (devThread) {
-        devThread->setGradingMode(index);
-    }
-
-    // Update pivot slider default
-    if (index == 0) { // ACES
-        ui->sliderSCurvePivot->setValue(35); // ~0.41
-    } else {          // LOG
-        ui->sliderSCurvePivot->setValue(50); // ~0.50
-    }
-
-    // trigger a re-develop of the current frame via your existing mechanism
-    // For example, if you have a “refreshPreview()” that posts a job
-    // to the worker thread, call that here.
-    //refreshPreview();   // or whatever you already use
+    // Kept for UI compatibility, but no longer switches pipeline branches.
     on_horizontalSlider_3_valueChanged(ImgViewCount);
 }
 void Processing::on_sliderSCurvePivot_valueChanged(int value)
