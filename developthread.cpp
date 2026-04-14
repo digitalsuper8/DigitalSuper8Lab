@@ -754,221 +754,125 @@ void DevelopThread::onTick()
 void DevelopThread::onDevelopFrame(int i)
 {
     m_currentFrameIndex = i;
+    ImageDeveloped = false;
 
-    try
-    {
-        ImageDeveloped = false;
+    char in_name[256];
+    std::snprintf(in_name, sizeof(in_name),
+                  "%s/images%d/XiCapture%03d.pgm", work_path, Roll, i);
 
-        char in_name[256];
-        std::snprintf(in_name, sizeof(in_name),
-                      "%s/images%d/XiCapture%03d.pgm", work_path, Roll, i);
-
-        cv::Mat imgBAY = cv::imread(in_name, cv::IMREAD_ANYDEPTH);
-        if (imgBAY.empty() || imgBAY.channels() != 1)
-        {
-            qWarning() << "[DevelopThread] Invalid RAW Bayer image:" << in_name;
-            return;
-        }
-
-        // ----------------------------------------------------------
-        // 1) Exposure on RAW Bayer before demosaic
-        // ----------------------------------------------------------
-        cv::Mat exposedBayer;
-        if (std::abs(ExposureEV) > 1e-4f)
-        {
-            const double gain = std::pow(2.0, static_cast<double>(ExposureEV));
-
-            if (imgBAY.depth() == CV_16U)
-                imgBAY.convertTo(exposedBayer, CV_16U, gain, 0.0);
-            else
-                imgBAY.convertTo(exposedBayer, CV_8U, gain, 0.0);
-        }
-        else
-        {
-            exposedBayer = imgBAY;
-        }
-
-        // ----------------------------------------------------------
-        // 2) Preview-style base path
-        //    12/16-bit Bayer -> 8-bit Bayer first, just like previewthread
-        // ----------------------------------------------------------
-        cv::Mat bayer8;
-        if (exposedBayer.depth() == CV_16U)
-        {
-            // 12-bit data in 16-bit container -> 8-bit display domain
-            exposedBayer.convertTo(bayer8, CV_8UC1, (1.0 / 16.0));
-        }
-        else
-        {
-            exposedBayer.convertTo(bayer8, CV_8UC1);
-        }
-
-        // ----------------------------------------------------------
-        // 3) Demosaic
-        // ----------------------------------------------------------
-        cv::Mat img8;
-        cv::cvtColor(bayer8, img8, cv::COLOR_BayerGB2BGR, 3);
-
-        // ----------------------------------------------------------
-        // 4) Flip to match previewthread / cartridge orientation
-        // ----------------------------------------------------------
-        cv::flip(img8, img8, -1);
-
-        // ----------------------------------------------------------
-        // 5) Base S-Log-ish look + sigmoid curve
-        // ----------------------------------------------------------
-        cv::LUT(img8, lut8_array, img8);
-        cv::LUT(img8, lutS_array, img8);
-
-        // ----------------------------------------------------------
-        // 6) Optional extra user S-curves
-        // ----------------------------------------------------------
-        if (filmlook)
-        {
-            cv::Mat f32;
-            img8.convertTo(f32, CV_32FC3, 1.0 / 255.0);
-
-            applySCurvesFloat(f32,
-                              lutSCurveRed,
-                              lutSCurveGreen,
-                              lutSCurveBlue);
-
-            cv::max(f32, 0.0f, f32);
-            cv::min(f32, 1.0f, f32);
-
-            f32.convertTo(img8, CV_8UC3, 255.0);
-        }
-
-        // ----------------------------------------------------------
-        // 7) Brightness / Saturation / Contrast in HSV
-        // ----------------------------------------------------------
-        {
-            cv::Mat imgHSV;
-            std::vector<cv::Mat> channels;
-
-            cv::cvtColor(img8, imgHSV, cv::COLOR_BGR2HSV);
-            cv::split(imgHSV, channels);
-
-            channels[2].convertTo(channels[2], -1, (Contrast / 100.0), Bright);
-            channels[1].convertTo(channels[1], -1, (Sat / 100.0), 0.0);
-
-            cv::merge(channels, imgHSV);
-            cv::cvtColor(imgHSV, img8, cv::COLOR_HSV2BGR);
-        }
-
-        // ----------------------------------------------------------
-        // 8) RGB gain trim
-        // ----------------------------------------------------------
-        {
-            std::vector<cv::Mat> channels;
-            cv::split(img8, channels); // B, G, R
-
-            channels[0].convertTo(channels[0], -1, Blue,  0.0);
-            channels[1].convertTo(channels[1], -1, Green, 0.0);
-            channels[2].convertTo(channels[2], -1, Red,   0.0);
-
-            cv::merge(channels, img8);
-        }
-
-        // ----------------------------------------------------------
-        // 9) Output bit depth
-        // ----------------------------------------------------------
-        if (bitdepth >= 16)
-        {
-            // 8-bit display image packed into 16-bit container for preview/export path
-            img8.convertTo(imgBGR, CV_16UC3, 257.0);
-        }
-        else
-        {
-            imgBGR = img8;
-        }
-
-        // ----------------------------------------------------------
-        // 10) Super 8 development effects (final image domain)
-        // ----------------------------------------------------------
-        applySuper8LightLeak(imgBGR);
-        applySuper8Grain(imgBGR);
-        applyScratches(imgBGR, i);
-        applyDust(imgBGR, i);
-
-        ImageDeveloped = true;
-        emit FrameDeveloped(i);
+    cv::Mat imgBAY = cv::imread(in_name, cv::IMREAD_ANYDEPTH);
+    if (imgBAY.empty()) {
+        qDebug() << "FROM function Develop Frame: No data in image";
+        return;
     }
-    catch (const cv::Exception& e)
-    {
-        qWarning() << "[DevelopThread] OpenCV EX:" << e.what();
-        ImageDeveloped = false;
+
+    // ------------------------------------------------------------
+    // Unify 8-bit and 16-bit RAW input into one 12-bit-style path
+    // ------------------------------------------------------------
+    cv::Mat imgBAYwork;
+    if (imgBAY.depth() == CV_16U) {
+        // Native 12-bit-in-16-bit container
+        imgBAYwork = imgBAY;
+        qDebug() << "Native 16-bit Bayer input";
+    } else {
+        // 8-bit RAW -> promote to 12-bit domain
+        // 0..255 becomes 0..4080, which fits the old LOG16 / S-curve logic well
+        imgBAY.convertTo(imgBAYwork, CV_16UC1, 16.0);
+        qDebug() << "Promoted 8-bit Bayer input to 16-bit/12-bit domain";
     }
+
+    // Demosaic exactly like the old developthread reference
+    cv::cvtColor(imgBAYwork, imgBGR, cv::COLOR_BayerGB2BGR, 3);
+
+    qDebug() << "successfully demosaiced, bit depth =" << imgBGR.depth()
+             << "number of channels:" << imgBGR.channels();
+
+    // ------------------------------------------------------------
+    // Same old reference pipeline for BOTH 8-bit and 16-bit sources
+    // ------------------------------------------------------------
+    imgBGR = LOG16(imgBGR, lut16);
+
+    if (filmlook) {
+        // IMPORTANT: keep this exact order from the reference
+        FilmLook16(imgBGR, imgBGR,
+                   48, 0.6, 192, 0.3,
+                   lutSCurveBlue, lutSCurveGreen, lutSCurveRed);
+    }
+
+    // Move into float domain exactly like the 16-bit reference path
+    imgBGR.convertTo(imgBGR, CV_32FC3, (1.0 / 4095.0), 0);
+
+    // ------------------------------------------------------------
+    // Old reference HSV corrections
+    // ------------------------------------------------------------
+    cv::Mat img_HSV;
+    std::vector<cv::Mat> channels;
+
+    // NOTE:
+    // This is intentionally kept the same style as the old reference.
+    cv::cvtColor(imgBGR, img_HSV, cv::COLOR_RGB2HSV_FULL);
+    cv::split(img_HSV, channels);
+
+    channels[2].convertTo(channels[2], -1, (Contrast / 100.0), (Bright / 255.0));
+    channels[1].convertTo(channels[1], -1, (Sat / 100.0), 0);
+
+    cv::merge(channels, img_HSV);
+    cv::cvtColor(img_HSV, imgBGR, cv::COLOR_HSV2RGB_FULL);
+
+    // ------------------------------------------------------------
+    // Old reference RGB gain trim
+    // ------------------------------------------------------------
+    cv::split(imgBGR, channels);
+    channels[0].convertTo(channels[0], -1, Blue, 0);
+    channels[1].convertTo(channels[1], -1, Green, 0);
+    channels[2].convertTo(channels[2], -1, Red, 0);
+    cv::merge(channels, imgBGR);
+
+    // ------------------------------------------------------------
+    // Final output exactly like old float path
+    // ------------------------------------------------------------
+    imgBGR.convertTo(imgBGR, CV_8UC3, 255.0, 0);
+
+    if (gammacorrect) {
+        imgBGR = correctGamma(imgBGR, (1.0 / 2.2));
+    }
+
+    // Final flip exactly like the reference developthread
+    cv::flip(imgBGR, imgBGR, -1);
+
+    // ------------------------------------------------------------
+    // Keep your current modern Super8 post-effects
+    // ------------------------------------------------------------
+    applySuper8LightLeak(imgBGR);
+    applySuper8Grain(imgBGR);
+    applyScratches(imgBGR, i);
+    applyDust(imgBGR, i);
+
+    ImageDeveloped = true;
+    emit FrameDeveloped(i);
 }
-
-
 
 void DevelopThread::calc_LutCurve()
 {
-    // 1) Decide the pivot in normalized [0..1] based on grading mode
-    float defaultPivot =
-        (m_gradingMode == GradingMode::ACES) ? 0.41f : 0.50f;
-
-    // If user has not set pivot yet (m_sCurvePivot < 0),
-    // use the default for the current mode.
-    float pivotNorm = (m_sCurvePivot >= 0.0f) ? m_sCurvePivot : defaultPivot;
-
-    // Clamp to a safe range
-    pivotNorm = std::clamp(pivotNorm, 0.0f, 1.0f);
-
-    // Convert normalized pivot to 0..4095 scale
-    const double pivot = static_cast<double>(pivotNorm) * 4095.0;
-
-    auto buildCurve = [&](double strength, ushort* lut)
+    for (int i = 0; i < 4096; i++)
     {
-        // 0 → identity (no curve at all, no grey wash)
-        if (strength <= 0.0) {
-            for (int i = 0; i < 4096; ++i) {
-                lut[i] = static_cast<ushort>(i);
-            }
-            return;
-        }
+        lutSCurveRed[i] =
+            cv::saturate_cast<ushort>(
+                (1 / (1 + exp((double)(-(CurveRed / 4095.0) * ((i - 2450) - 0))))) * 4095.0
+                );
 
-        // This is the "base" curve level you liked (8 was your sweet spot)
-        const double baseCurve = 8.0;
+        lutSCurveGreen[i] =
+            cv::saturate_cast<ushort>(
+                (1 / (1 + exp((double)(-(CurveGreen / 4095.0) * ((i - 2450) - 0))))) * 4095.0
+                );
 
-        for (int i = 0; i < 4096; ++i)
-        {
-            double x = static_cast<double>(i);
-            double y = 0.0;
+        lutSCurveBlue[i] =
+            cv::saturate_cast<ushort>(
+                (1 / (1 + exp((double)(-(CurveBlue / 4095.0) * ((i - 2450) - 0))))) * 4095.0
+                );
+    }
 
-            if (strength < baseCurve)
-            {
-                // ---- LOW-STRENGTH REGION: blend identity ↔ S-curve(at 8) ----
-                double kBase = baseCurve / 4095.0;
-                double sBase = 1.0 / (1.0 + std::exp(-kBase * (x - pivot)));
-                double hard  = sBase * 4095.0;
-
-                double ident = x;
-                double t     = strength / baseCurve;  // 0..1
-
-                y = (1.0 - t) * ident + t * hard;
-            }
-            else
-            {
-                // ---- ORIGINAL BEHAVIOUR FOR "REAL" VALUES (>= 8) ----
-                double k = strength / 4095.0;
-                double s = 1.0 / (1.0 + std::exp(-k * (x - pivot)));
-                y = s * 4095.0;
-            }
-
-            if (y < 0.0)   y = 0.0;
-            if (y > 4095.) y = 4095.;
-
-            lut[i] = static_cast<ushort>(std::lround(y));
-        }
-    };
-
-    buildCurve(CurveRed,   lutSCurveRed);
-    buildCurve(CurveGreen, lutSCurveGreen);
-    buildCurve(CurveBlue,  lutSCurveBlue);
-
-    // Emit a copy that the UI can safely use for painting
+    // Keep current UI preview support
     QVector<quint16> r(4096), g(4096), b(4096);
     for (int i = 0; i < 4096; ++i) {
         r[i] = lutSCurveRed[i];
