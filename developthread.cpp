@@ -451,6 +451,38 @@ static void applyRRT_ODT_Rec709(const cv::Mat &src, cv::Mat &dst)
 
 } // anonymous namespace
 
+//NEW:
+static cv::Mat ApplyLut16(const cv::Mat& src, const ushort* lut)
+{
+    cv::Mat dst = src.clone();
+
+    const int channels = dst.channels();
+
+    switch (channels)
+    {
+    case 1:
+    {
+        for (cv::MatIterator_<ushort> it = dst.begin<ushort>(), end = dst.end<ushort>(); it != end; ++it)
+            *it = lut[*it];
+        break;
+    }
+    case 3:
+    {
+        for (cv::MatIterator_<cv::Vec3w> it = dst.begin<cv::Vec3w>(), end = dst.end<cv::Vec3w>(); it != end; ++it)
+        {
+            (*it)[0] = lut[(*it)[0]];
+            (*it)[1] = lut[(*it)[1]];
+            (*it)[2] = lut[(*it)[2]];
+        }
+        break;
+    }
+    default:
+        break;
+    }
+
+    return dst;
+}
+
 static float plannedLeakEnvelope(int frameIndex, int F)
 {
     int d = frameIndex - F;
@@ -489,6 +521,10 @@ DevelopThread::DevelopThread(QObject* parent) : QObject(parent)
         lut16[i] = saturate_cast<ushort>(((3757.0-32.0)*0.432699)*log10((((double)i-(32.0))/(470.0-32.0))+0.037584) + (0.616596*4095));
     }
     calc_LutCurve();
+
+    // new Cineon / print LUTs
+    calcSLogToCineonLut();
+    calcFilmPrintLut();
 
     // new code for 8 bit development:
     Mat lut8(1, 256.0, CV_8UC1);
@@ -771,45 +807,41 @@ void DevelopThread::onDevelopFrame(int i)
     // ------------------------------------------------------------
     cv::Mat imgBAYwork;
     if (imgBAY.depth() == CV_16U) {
-        // Native 12-bit-in-16-bit container
         imgBAYwork = imgBAY;
         qDebug() << "Native 16-bit Bayer input";
     } else {
-        // 8-bit RAW -> promote to 12-bit domain
-        // 0..255 becomes 0..4080, which fits the old LOG16 / S-curve logic well
         imgBAY.convertTo(imgBAYwork, CV_16UC1, 16.0);
         qDebug() << "Promoted 8-bit Bayer input to 16-bit/12-bit domain";
     }
 
-    // Demosaic exactly like the old developthread reference
+    // Demosaic
     cv::cvtColor(imgBAYwork, imgBGR, cv::COLOR_BayerGB2BGR, 3);
 
     qDebug() << "successfully demosaiced, bit depth =" << imgBGR.depth()
              << "number of channels:" << imgBGR.channels();
 
     // ------------------------------------------------------------
-    // Same old reference pipeline for BOTH 8-bit and 16-bit sources
+    // Route we now want to try:
+    // 1) LOG16  (= S-Log-like stage)
+    // 2) S-Log -> Cineon LUT
+    // 3) Film Print LUT
     // ------------------------------------------------------------
     imgBGR = LOG16(imgBGR, lut16);
+    imgBGR = ApplyLut16(imgBGR, lutSLogToCineon);
+    imgBGR = ApplyLut16(imgBGR, lutFilmPrint);
 
-    if (filmlook) {
-        // IMPORTANT: keep this exact order from the reference
-        FilmLook16(imgBGR, imgBGR,
-                   48, 0.6, 192, 0.3,
-                   lutSCurveBlue, lutSCurveGreen, lutSCurveRed);
-    }
-
-    // Move into float domain exactly like the 16-bit reference path
+    // ------------------------------------------------------------
+    // Move to float for the same downstream grading controls
+    // ------------------------------------------------------------
     imgBGR.convertTo(imgBGR, CV_32FC3, (1.0 / 4095.0), 0);
 
     // ------------------------------------------------------------
-    // Old reference HSV corrections
+    // HSV corrections
     // ------------------------------------------------------------
     cv::Mat img_HSV;
     std::vector<cv::Mat> channels;
 
-    // NOTE:
-    // This is intentionally kept the same style as the old reference.
+    // Keep same style as your old reference logic
     cv::cvtColor(imgBGR, img_HSV, cv::COLOR_RGB2HSV_FULL);
     cv::split(img_HSV, channels);
 
@@ -820,7 +852,7 @@ void DevelopThread::onDevelopFrame(int i)
     cv::cvtColor(img_HSV, imgBGR, cv::COLOR_HSV2RGB_FULL);
 
     // ------------------------------------------------------------
-    // Old reference RGB gain trim
+    // RGB trim
     // ------------------------------------------------------------
     cv::split(imgBGR, channels);
     channels[0].convertTo(channels[0], -1, Blue, 0);
@@ -829,7 +861,7 @@ void DevelopThread::onDevelopFrame(int i)
     cv::merge(channels, imgBGR);
 
     // ------------------------------------------------------------
-    // Final output exactly like old float path
+    // Final output for preview / video render
     // ------------------------------------------------------------
     imgBGR.convertTo(imgBGR, CV_8UC3, 255.0, 0);
 
@@ -837,11 +869,11 @@ void DevelopThread::onDevelopFrame(int i)
         imgBGR = correctGamma(imgBGR, (1.0 / 2.2));
     }
 
-    // Final flip exactly like the reference developthread
+    // Final flip
     cv::flip(imgBGR, imgBGR, -1);
 
     // ------------------------------------------------------------
-    // Keep your current modern Super8 post-effects
+    // Keep current Super8 post-effects
     // ------------------------------------------------------------
     applySuper8LightLeak(imgBGR);
     applySuper8Grain(imgBGR);
@@ -1654,3 +1686,88 @@ void DevelopThread::applyDust(cv::Mat& imgBgr, int frameIndex)
     f.convertTo(imgBgr, inType);
 }
 
+//New methods:
+void DevelopThread::calcSLogToCineonLut()
+{
+    // Sony paper anchor points, scaled from 10-bit to 12-bit
+    // S-Log:
+    //   2%  -> 167
+    //   18% -> 394
+    //   90% -> 636
+    // top   -> 974
+    //
+    // Cineon:
+    //   2%  -> 220
+    //   18% -> 470
+    //   90% -> 685
+    //
+    // We build a simple piecewise 1D LUT in 12-bit domain.
+
+    const double scale = 4095.0 / 1023.0;
+
+    const double s0 =  90.0 * scale;   // black-ish floor in S-Log table
+    const double c0 =  95.0 * scale;   // gentle lifted Cineon-like floor
+
+    const double s1 = 167.0 * scale;   // 2%
+    const double c1 = 220.0 * scale;
+
+    const double s2 = 394.0 * scale;   // 18%
+    const double c2 = 470.0 * scale;
+
+    const double s3 = 636.0 * scale;   // 90%
+    const double c3 = 685.0 * scale;
+
+    const double s4 = 974.0 * scale;   // upper S-Log range
+    const double c4 = 1023.0 * scale;  // upper Cineon-ish range
+
+    auto lerp = [](double a, double b, double t) {
+        return a + (b - a) * t;
+    };
+
+    for (int i = 0; i < 4096; ++i)
+    {
+        double x = static_cast<double>(i);
+        double y = 0.0;
+
+        if (x <= s0) {
+            y = c0;
+        }
+        else if (x <= s1) {
+            double t = (x - s0) / std::max(1.0, (s1 - s0));
+            y = lerp(c0, c1, t);
+        }
+        else if (x <= s2) {
+            double t = (x - s1) / (s2 - s1);
+            y = lerp(c1, c2, t);
+        }
+        else if (x <= s3) {
+            double t = (x - s2) / (s3 - s2);
+            y = lerp(c2, c3, t);
+        }
+        else if (x <= s4) {
+            double t = (x - s3) / (s4 - s3);
+            y = lerp(c3, c4, t);
+        }
+        else {
+            y = c4;
+        }
+
+        lutSLogToCineon[i] = cv::saturate_cast<ushort>(y);
+    }
+}
+
+void DevelopThread::calcFilmPrintLut()
+{
+    // Simple print-emulation LUT:
+    // a gentle sigmoid used as a film-print-style display curve.
+    // This is intentionally simple and easy to tune.
+
+    const double strength = 10.0;
+    const double pivot    = 2450.0;
+
+    for (int i = 0; i < 4096; ++i)
+    {
+        double s = 1.0 / (1.0 + std::exp(-(strength / 4095.0) * (static_cast<double>(i) - pivot)));
+        lutFilmPrint[i] = cv::saturate_cast<ushort>(s * 4095.0);
+    }
+}

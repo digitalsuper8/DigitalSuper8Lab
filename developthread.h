@@ -96,6 +96,9 @@ public:
     bool renderingBusy = false;
     float ExposureEV = 0.f;
 
+    ushort lutSLogToCineon[4096];
+    ushort lutFilmPrint[4096];
+
 signals:
     void sCurvesUpdated(QVector<quint16> r, QVector<quint16> g, QVector<quint16> b);
     void FrameDeveloped(int);
@@ -126,6 +129,9 @@ public slots:
 
     void onDevelopFrame(int i);
     void calc_LutCurve();
+
+    void calcSLogToCineonLut();
+    void calcFilmPrintLut();
 
 private slots:
     void onTick();

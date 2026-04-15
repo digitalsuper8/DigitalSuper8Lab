@@ -273,9 +273,9 @@ Processing::Processing(QWidget *parent) :
             this, [this](int v){ on_horizontalSlider_3_valueChanged(v); });
 
 
-    QTimer::singleShot(0, this, [this]{
-        on_LastButton_clicked();
-    });
+   // QTimer::singleShot(0, this, [this]{
+   //     on_LastButton_clicked();
+   // });
 
     devThread->first_frame = 1;
 
@@ -333,7 +333,7 @@ Processing::Processing(QWidget *parent) :
     ui->bitDepth->setValue(8);
 
     ui->Red_Slider->setValue(140);
-    ui->Green_Slider->setValue(100);
+    ui->Green_Slider->setValue(120);
     ui->Blue_Slider->setValue(160);
 
     ui->Brightness_slider->setValue(-40);
@@ -353,10 +353,10 @@ Processing::Processing(QWidget *parent) :
     devThread->gammacorrect = false;
 
     devThread->Red = 1.40f;
-    devThread->Green = 1.00f;
+    devThread->Green = 1.20f;
     devThread->Blue = 1.60f;
     devThread->Bright = -40.0f;
-    devThread->Sat = 250.0f;
+    devThread->Sat = 240.0f;
     devThread->Contrast = 100.0f;
     devThread->ExposureEV = 0.0f;
 
@@ -364,6 +364,15 @@ Processing::Processing(QWidget *parent) :
     devThread->CurveGreen = ui->spinBox_GreenCurve->value();
     devThread->CurveBlue  = ui->spinBox_BlueCurve->value();
     devThread->calc_LutCurve();
+
+    QTimer::singleShot(0, this, [this]{
+        on_LastButton_clicked();
+    });
+
+    QTimer::singleShot(0, this, [this]{
+        on_Green_Slider_valueChanged(ui->Green_Slider->value());
+    });
+
     }
 
 Processing::~Processing()
