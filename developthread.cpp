@@ -827,7 +827,7 @@ void DevelopThread::onDevelopFrame(int i)
     // 3) Film Print LUT
     // ------------------------------------------------------------
     imgBGR = LOG16(imgBGR, lut16);
-    imgBGR = ApplyLut16(imgBGR, lutSLogToCineon);
+   // imgBGR = ApplyLut16(imgBGR, lutSLogToCineon);
     imgBGR = ApplyLut16(imgBGR, lutFilmPrint);
 
     // ------------------------------------------------------------
