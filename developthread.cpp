@@ -28,6 +28,28 @@ using namespace std;
 namespace
 {
 
+inline void applyWhiteBalance16(cv::Mat& img, float wbR, float wbG, float wbB)
+{
+    CV_Assert(img.type() == CV_16UC3);
+
+    for (int y = 0; y < img.rows; ++y)
+    {
+        cv::Vec<unsigned short, 3>* row = img.ptr<cv::Vec<unsigned short, 3>>(y);
+        for (int x = 0; x < img.cols; ++x)
+        {
+            cv::Vec<unsigned short, 3>& p = row[x]; // BGR
+
+            const float b = p[0] * wbB;
+            const float g = p[1] * wbG;
+            const float r = p[2] * wbR;
+
+            p[0] = static_cast<unsigned short>(std::min(4095.0f, std::max(0.0f, b)));
+            p[1] = static_cast<unsigned short>(std::min(4095.0f, std::max(0.0f, g)));
+            p[2] = static_cast<unsigned short>(std::min(4095.0f, std::max(0.0f, r)));
+        }
+    }
+}
+
 inline float toLogC3(float x)
 {
     const float cut = 0.010591f;
@@ -788,6 +810,11 @@ void DevelopThread::onDevelopFrame(int i)
              << "number of channels:" << imgBGR.channels();
 
     // ------------------------------------------------------------
+    // Pre-LOG white balance on 16-bit demosaiced BGR
+    // ------------------------------------------------------------
+    applyWhiteBalance16(imgBGR, 1.00f, 0.75f, 1.12f);//Set this is Red, Green, Blue values in that order
+
+    // ------------------------------------------------------------
     // Same old reference pipeline for BOTH 8-bit and 16-bit sources
     // ------------------------------------------------------------
     imgBGR = LOG16(imgBGR, lut16);
@@ -802,22 +829,24 @@ void DevelopThread::onDevelopFrame(int i)
     // Move into float domain exactly like the 16-bit reference path
     imgBGR.convertTo(imgBGR, CV_32FC3, (1.0 / 4095.0), 0);
 
+ //   applyWhiteBalance(imgBGR, 1.05f, 0.95f, 1.00f);
+ //   clamp01(imgBGR);
+
     // ------------------------------------------------------------
     // Old reference HSV corrections
     // ------------------------------------------------------------
     cv::Mat img_HSV;
     std::vector<cv::Mat> channels;
 
-    // NOTE:
-    // This is intentionally kept the same style as the old reference.
-    cv::cvtColor(imgBGR, img_HSV, cv::COLOR_RGB2HSV_FULL);
+    // imgBGR is truly BGR, so use BGR <-> HSV conversions here
+    cv::cvtColor(imgBGR, img_HSV, cv::COLOR_BGR2HSV_FULL);
     cv::split(img_HSV, channels);
 
     channels[2].convertTo(channels[2], -1, (Contrast / 100.0), (Bright / 255.0));
     channels[1].convertTo(channels[1], -1, (Sat / 100.0), 0);
 
     cv::merge(channels, img_HSV);
-    cv::cvtColor(img_HSV, imgBGR, cv::COLOR_HSV2RGB_FULL);
+    cv::cvtColor(img_HSV, imgBGR, cv::COLOR_HSV2BGR_FULL);
 
     // ------------------------------------------------------------
     // Old reference RGB gain trim

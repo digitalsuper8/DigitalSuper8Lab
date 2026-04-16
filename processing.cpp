@@ -330,14 +330,14 @@ Processing::Processing(QWidget *parent) :
     ui->label_11->setText("Simple preview-style processing");
 
     // Previewthread-like defaults
-    ui->bitDepth->setValue(8);
+    ui->bitDepth->setValue(16);
 
-    ui->Red_Slider->setValue(140);
-    ui->Green_Slider->setValue(100);
-    ui->Blue_Slider->setValue(160);
+    ui->Red_Slider->setValue(120);
+    ui->Green_Slider->setValue(120);
+    ui->Blue_Slider->setValue(120);
 
-    ui->Brightness_slider->setValue(-40);
-    ui->Saturation_slider->setValue(250);
+    ui->Brightness_slider->setValue(-35);
+    ui->Saturation_slider->setValue(175);
     ui->Contrast_slider->setValue(100);
     ui->ExposureCombo->setCurrentIndex(4); // 0 EV
 
@@ -347,16 +347,16 @@ Processing::Processing(QWidget *parent) :
     ui->spinBox_BlueCurve->setValue(8);
     ui->sliderSCurvePivot->setValue(50);
 
-    devThread->bitdepth = 8;
+    devThread->bitdepth = 16;
     devThread->filmlook = false;
     devThread->HDR = false;
     devThread->gammacorrect = false;
 
-    devThread->Red = 1.40f;
-    devThread->Green = 1.00f;
-    devThread->Blue = 1.60f;
-    devThread->Bright = -40.0f;
-    devThread->Sat = 250.0f;
+    devThread->Red = 1.20f;
+    devThread->Green = 1.20f;
+    devThread->Blue = 1.20f;
+    devThread->Bright = -35.0f;
+    devThread->Sat = 175.0f;
     devThread->Contrast = 100.0f;
     devThread->ExposureEV = 0.0f;
 
