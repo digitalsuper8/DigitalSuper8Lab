@@ -157,7 +157,7 @@ Processing::Processing(QWidget *parent) :
 
 {
     PlayingVideo = false;
-   // RenderingVideo = false;
+    // RenderingVideo = false;
     filmlook = true;
     gammacorrect = false;
     ui->setupUi(this);
@@ -172,7 +172,29 @@ Processing::Processing(QWidget *parent) :
     });
     // end of debounce timer instantiation and connecting it to the slot on_horizontalSlider_3_valueChanged(ImgViewCount)
 
-  //  qRegisterMetaType<Super8DevParams>("Super8DevParams");
+    m_playTimer = new QTimer(this);
+    m_playTimer->setSingleShot(false);
+    connect(m_playTimer, &QTimer::timeout, this, [this]() {
+        if (imgcount <= 0) {
+            m_playTimer->stop();
+            PlayingVideo = false;
+            return;
+        }
+
+        int v = ui->horizontalSlider_3->value();
+        if (v < 1) v = 1;
+
+        if (v < imgcount) {
+            ui->horizontalSlider_3->setValue(v + 1);
+        } else if (ui->loopCheck->isChecked()) {
+            ui->horizontalSlider_3->setValue(1);
+        } else {
+            m_playTimer->stop();
+            PlayingVideo = false;
+        }
+    });
+
+    //  qRegisterMetaType<Super8DevParams>("Super8DevParams");
 
     hookUpSuper8DevUi();
 
@@ -242,9 +264,14 @@ Processing::Processing(QWidget *parent) :
     connect(devThread, &DevelopThread::sCurvesUpdated,
             ui->sCurvePreview, &SCurvePreviewLUT::setLUTs);
 
+    connect(devThread, &DevelopThread::renderFinished,
+            this, [this]() {
+                setRenderUiLocked(false);
+            });
+
     connect(this, &Processing::super8DevParamsChanged,
             devThread, &DevelopThread::setSuper8DevParams,
-            Qt::DirectConnection);
+            Qt::QueuedConnection);
 
 
 
@@ -269,9 +296,10 @@ Processing::Processing(QWidget *parent) :
     qDebug() << " IIMGCOUNTER IS: " << imgcounter_filename;
     imgcount = GetNumber(imgcounter_filename);
 
-     connect(ui->horizontalSlider_3, &QSlider::sliderMoved,
-            this, [this](int v){ on_horizontalSlider_3_valueChanged(v); });
-
+    connect(ui->horizontalSlider_3, &QSlider::sliderMoved,
+            this, [this](int v) {
+                on_horizontalSlider_3_valueChanged(v);
+            });
 
     QTimer::singleShot(0, this, [this]{
         on_LastButton_clicked();
@@ -290,7 +318,7 @@ Processing::Processing(QWidget *parent) :
     devThread->setToneCurveMode(ui->comboToneCurve->currentIndex());
 
     onUpdateUI();
-   // ui->SCurveBox->
+    // ui->SCurveBox->
     ui->Red_Slider->setValue(100);//140
     ui->Green_Slider->setValue(100);//120
     ui->Blue_Slider->setValue(100);//160
@@ -364,13 +392,18 @@ Processing::Processing(QWidget *parent) :
     devThread->CurveGreen = ui->spinBox_GreenCurve->value();
     devThread->CurveBlue  = ui->spinBox_BlueCurve->value();
     devThread->calc_LutCurve();
-    }
+}
 
 Processing::~Processing()
 {
+    if (m_playTimer)
+        m_playTimer->stop();
+
     if (devThread) {
-        devThread->cancelRender();
-        devThread->pause(); // stop timer if playing
+        QMetaObject::invokeMethod(devThread, [this]() {
+            devThread->cancelRender();
+            devThread->pause();
+        }, Qt::QueuedConnection);
     }
     if (devQThread) {
         devQThread->quit();
@@ -461,15 +494,10 @@ void Processing::onUpdateUI()
     ui->label_9->setText(QString::number(height));
     ui->label->setText(QString::number(imgcount));
     ui->progressBar->setValue(imgcount);
-    ImgViewCount = imgcount;
-    ui->horizontalSlider_3->setMinimum(0);
 
-  //  ui->horizontalSlider_3->setMinimum(1);
-  //  ui->horizontalSlider_3->setMaximum(imgcount);
-  //  ui->horizontalSlider_3->setValue(qMax(1, imgcount));
-  //  ImgViewCount = qMax(1, imgcount);
-
-    ui->horizontalSlider_3->setMaximum(ImgViewCount);
+    ImgViewCount = std::max(1, imgcount);
+    ui->horizontalSlider_3->setMinimum(1);
+    ui->horizontalSlider_3->setMaximum(std::max(1, imgcount));
     ui->horizontalSlider_3->setValue(ImgViewCount);
 }
 
@@ -495,40 +523,40 @@ void Processing::onASAChanged(int setASA, float setGain)
 
 void Processing::onExposureChanged(int setExp)
 {
-     return;
+    return;
 }
 
 void Processing::onRollChanged(int setRoll, int setExp, int setDown, int setOffx, int setOffy, int setWidth, int setHeight)
 {
-     Roll = setRoll; width = setWidth; height = setHeight;
+    Roll = setRoll; width = setWidth; height = setHeight;
 
-     sprintf(imgcounter_filename, "%s/imgcounter%d.txt", work_path, Roll);
-     imgcount = GetNumber(imgcounter_filename);
-     onUpdateUI();
-     return;
+    sprintf(imgcounter_filename, "%s/imgcounter%d.txt", work_path, Roll);
+    imgcount = GetNumber(imgcounter_filename);
+    onUpdateUI();
+    return;
 }
 
 void Processing::on_DevelopFilm_Button_clicked()
 {
-    // Make sure devThread knows the current capture context:
+    if (m_playTimer)
+        m_playTimer->stop();
+
+    // Maak zeker dat devThread de actuele context heeft
     devThread->width  = width;
     devThread->height = height;
     devThread->Roll   = Roll;
 
-    std::strncpy(devThread->work_path, work_path, sizeof(devThread->work_path)-1);
-    devThread->work_path[sizeof(devThread->work_path)-1] = '\0';
-    // work_path is already copied elsewhere when you select the dir (good)
-
+    strncpy_s(devThread->work_path, work_path, sizeof(devThread->work_path) - 1);
+    devThread->work_path[sizeof(devThread->work_path) - 1] = '\0';
 
     DevelopDialog dDialog(this);
-
-    // No need to connect the old signals anymore; the dialog will launch the render itself.
-    // (If you still want the signals for legacy UI text, you can keep them, but don't start the thread here.)
-
-    // Hand the dialog the context it needs: the thread to run on, current frame, and last frame
     dDialog.setDevelopContext(devThread, ImgViewCount, imgcount);
     dDialog.setModal(true);
-    dDialog.exec();   // On OK, DevelopDialog::onDialogAccepted() calls devThread->startRenderToFile()
+
+    // Alleen locken als gebruiker echt OK doet en render start
+    if (dDialog.exec() == QDialog::Accepted) {
+        setRenderUiLocked(true);
+    }
 }
 
 
@@ -546,7 +574,7 @@ void Processing::on_DevelopFilm_Button_clicked()
 //        sprintf(devThread->file_type, "mp4");
 //        qDebug() << "Codec set to MJPG";
 //        break;
- //   default:
+//   default:
 //        devThread->codec = VideoWriter::fourcc('I','Y','U','V');
 //        qDebug() << "Codec set to IYUV";
 //        sprintf(devThread->file_type, "avi");
@@ -565,96 +593,62 @@ void Processing::on_DevelopFilm_Button_clicked()
 
 void Processing::onFrameDeveloped(int i)
 {
-    cv::Mat show = devThread->imgBGR.clone(); // <-- deep copy, not a ref
+    cv::Mat show = devThread->imgBGR.clone();
+
+    if (show.empty())
+        return;
 
     if (show.depth() == CV_16U) {
         show.convertTo(show, CV_8UC3, 255.0 / 4095.0);
     }
 
-
     cv::cvtColor(show, show, cv::COLOR_BGR2RGB);
     QImage qimg(show.data, show.cols, show.rows, int(show.step), QImage::Format_RGB888);
 
-    setPreview(qimg.copy());  // <-- hand an owned image to the UI
+    setPreview(qimg.copy());
 
+    ImgViewCount = i;
     ui->label_FrameView->setNum(i);
 }
 
 
+
 void Processing::on_Back_Button_clicked()
 {
-    ImgViewCount--;
-    if (ImgViewCount < 0){
-        ImgViewCount = 0;
-    }
-    else{
-    ui->horizontalSlider_3->setValue(ImgViewCount);
-    }
+    if (m_renderUiLocked) return;
+    if (m_playTimer)
+        m_playTimer->stop();
+
+    int v = ui->horizontalSlider_3->value();
+    if (v > 1)
+        ui->horizontalSlider_3->setValue(v - 1);
 }
 
 void Processing::on_LastButton_clicked()
 {
-    ImgViewCount = imgcount;
+    if (m_renderUiLocked) return;
+    if (m_playTimer)
+        m_playTimer->stop();
 
-  //  ImgViewCount = std::max(1, imgcount);
-  //  ui->horizontalSlider_3->setValue(ImgViewCount);
-
-    // //ui->horizontalSlider_3->setValue(ImgViewCount);
-
-    on_horizontalSlider_3_valueChanged(ImgViewCount);
-    qDebug() << "Imageviewcount value is: " << ImgViewCount;
-
+    if (imgcount > 0)
+        ui->horizontalSlider_3->setValue(imgcount);
 }
 
 
 
 void Processing::on_ForwardButton_clicked()
 {
-    ImgViewCount++;
-    if (ImgViewCount > imgcount){
-        ImgViewCount = imgcount;
-    }
-    else{
-    ui->horizontalSlider_3->setValue(ImgViewCount);
-    }
+    if (m_renderUiLocked) return;
+    if (m_playTimer)
+        m_playTimer->stop();
+
+    int v = ui->horizontalSlider_3->value();
+    if (v < imgcount)
+        ui->horizontalSlider_3->setValue(v + 1);
 }
 
 void Processing::on_BaseCurveCombo_currentIndexChanged(int index)
 {
-    devThread->baseCurveMode = index;
-
-
-
-    // Ensure sane defaults
-  //  devThread->useLog = false;
-  //  devThread->HDR    = false;
-
-  //  switch (index)
-  //  {
-  //  case 0: // None (Linear)
-  //      // Linear base → only exposure + CCM in DevelopThread
-  //      devThread->useLog = false;
-  //      devThread->HDR    = false;
-  //      break;
-//
-  //  case 1: // LOG16 (Sony-style)
-  //      devThread->useLog = true;
-  //      devThread->HDR    = false;
-  //      break;
-//
-  //  case 2: // ACES Filmic (HDR)
-  //      devThread->useLog = false;
-  //      devThread->HDR    = true;
-  //      break;
-//
-    //default:
-    //    // Fallback: linear
-    //    devThread->useLog = false;
-    //    devThread->HDR    = false;
-    //    break;
-    //}
-
-    // Re-develop current frame so user sees effect immediately
     on_horizontalSlider_3_valueChanged(ImgViewCount);
 }
 
@@ -667,13 +661,13 @@ void Processing::on_Red_Slider_valueChanged(int value)
 void Processing::on_Blue_Slider_valueChanged(int value)
 {
     devThread->Blue = (float) (value/100.0);
-     on_horizontalSlider_3_valueChanged(ImgViewCount);
+    on_horizontalSlider_3_valueChanged(ImgViewCount);
 }
 
 void Processing::on_Green_Slider_valueChanged(int value)
 {
     devThread->Green = (float) (value/100.0);
-     on_horizontalSlider_3_valueChanged(ImgViewCount);
+    on_horizontalSlider_3_valueChanged(ImgViewCount);
 }
 
 
@@ -681,19 +675,19 @@ void Processing::on_Green_Slider_valueChanged(int value)
 void Processing::on_Brightness_slider_valueChanged(int value)
 {
     devThread->Bright = value;
-     on_horizontalSlider_3_valueChanged(ImgViewCount);
+    on_horizontalSlider_3_valueChanged(ImgViewCount);
 }
 
 void Processing::on_Saturation_slider_valueChanged(int value)
 {
-      devThread->Sat = value;
-     on_horizontalSlider_3_valueChanged(ImgViewCount);
+    devThread->Sat = value;
+    on_horizontalSlider_3_valueChanged(ImgViewCount);
 }
 
 void Processing::on_Contrast_slider_valueChanged(int value)
 {
     devThread->Contrast = saturate_cast<float> (value);
-     on_horizontalSlider_3_valueChanged(ImgViewCount);
+    on_horizontalSlider_3_valueChanged(ImgViewCount);
 
 }
 
@@ -766,13 +760,13 @@ void Processing::on_spinBox_RedCurve_valueChanged(int arg1)
 {
     devThread->CurveRed = (double)arg1;
     devThread->calc_LutCurve();
-     on_horizontalSlider_3_valueChanged(ImgViewCount);
+    on_horizontalSlider_3_valueChanged(ImgViewCount);
 }
 
 void Processing::on_spinBox_GreenCurve_valueChanged(int arg1)
 {
-   devThread->CurveGreen = (double)arg1;
-   devThread->calc_LutCurve();
+    devThread->CurveGreen = (double)arg1;
+    devThread->calc_LutCurve();
     on_horizontalSlider_3_valueChanged(ImgViewCount);
 }
 
@@ -780,12 +774,12 @@ void Processing::on_spinBox_BlueCurve_valueChanged(int arg1)
 {
     devThread->CurveBlue = (double)arg1;
     devThread->calc_LutCurve();
-     on_horizontalSlider_3_valueChanged(ImgViewCount);
+    on_horizontalSlider_3_valueChanged(ImgViewCount);
 }
 
 void Processing::on_SelectDir_Button_clicked()
 {
-     char *path;
+    char *path;
     QFileDialog dialog(this);
 
     dialog.setFileMode(QFileDialog::Directory);
@@ -813,91 +807,21 @@ void Processing::on_GammaCorrectionBox_clicked(bool)
     on_horizontalSlider_3_valueChanged(ImgViewCount);
 }
 
-//Here enter the functions that will be used across the classes
 
-//Mat PrepareFrameForDisplay(char work_path[256], int Roll, int frame, float Blue, float Green, float Red, float Bright, float Sat, float Contrast, bool filmlook, bool gammacorrect, ushort *lut16, ushort *lutSCurveRed, ushort *lutSCurveGreen, ushort *lutSCurveBlue)
-//{
-//    char frame_name[256];
-//    sprintf(frame_name, "%s/images%d/XiCapture%03d.pgm", work_path, Roll, frame);
-//    Mat img;
-//    Mat img_HSV;
-//    Mat imgBAY;
-//    vector<Mat> channels; //HSVchannels;
-//    float factor = (256 * (Contrast + 255)) / (255 * (256 - Contrast));
-//    imgBAY = imread(frame_name, IMREAD_ANYDEPTH | IMREAD_ANYCOLOR);
-//    if(imgBAY.empty()){
-//                qDebug() << "FROM function PrepareFrameForDisplay: No data in image, frame-name is: " << frame_name << "Roll is: " << Roll;
-//                return(img);
-//            }
-//    cvtColor(imgBAY, img, COLOR_BayerGB2RGB, 3);//26072024: this line works and colors are displayed correct on screen
-//    flip(img, img, -1);// 26072024: added this to flip the image upside down.
-//
-//    if(img.depth() == 2){ // 12 bit image case
-//    img = LOG16(img, lut16);
-//    if(filmlook) FilmLook16(img, img, 48, 0.6, 192, 0.3, lutSCurveRed, lutSCurveGreen, lutSCurveBlue);
-//    img.convertTo(img, CV_32FC3, (1./4095.), 0);
-//
-//    cvtColor(img, img_HSV, COLOR_RGB2HSV_FULL); //change the color image from BGR to YCrCb format
-//    split(img_HSV,channels); //split the image into channels
-//    channels[2].convertTo(channels[2], -1, (Contrast/100.0), (Bright/255.));
-//    channels[1].convertTo(channels[1], -1, (Sat/100.0), 0);
-//    merge(channels, img_HSV);
-//    cvtColor(img_HSV, img, COLOR_HSV2RGB_FULL);
-//
-//    split(img,channels); //split the image into channels
-//
-//    channels[0].convertTo(channels[0], -1, Blue, 0);
-//    channels[1].convertTo(channels[1], -1, Green, 0);
-//    channels[2].convertTo(channels[2], -1, Red, 0);
-//
-//    merge(channels,img);
-//    img.convertTo(img, CV_8UC3, 255.0, 0);
-//    if(gammacorrect){
-//        img = correctGamma(img, (1.0/2.2));
-//    }
-//   }
-//    else{ // 8 bit image case
-//    img = correctGamma(img, 2.2);
-//    cvtColor(img, img_HSV, COLOR_BGR2HSV); //change the color image from BGR to YCrCb format
-//    split(img_HSV,channels); //split the image into channels
-//
-//    channels[2].convertTo(channels[2], -1, (Contrast/100.0), Bright);
-//    channels[1].convertTo(channels[1], -1, (Sat/100.0), 0);
-//
-//    merge(channels, img_HSV);
-//    cvtColor(img_HSV, img, COLOR_HSV2BGR);
-//
-//    split(img,channels); //split the image into channels
-//
-//   channels[0].convertTo(channels[0], -1, Blue, 0);
-//    channels[1].convertTo(channels[1], -1, Green, 0);
-//    channels[2].convertTo(channels[2], -1, Red, 0);
-//
-//    merge(channels,img);
-//    if (filmlook){
-//        cvtColor(img,img, COLOR_BGR2RGB);
-//        img = FilmLook(img, 48, 0.6, 192, 0.3);
-//        cvtColor(img,img, COLOR_RGB2BGR);
-//    }
-//    }
-//
-//   return (img);
-//
-//}
 
 bool copy_file( const char* srce_file, const char* dest_file )
 {
     ifstream srce( srce_file, ios::binary ) ;
     if(!srce.is_open())
     {
-      qDebug() << "error! the file doesn't exist";
-      return(false);
+        qDebug() << "error! the file doesn't exist";
+        return(false);
     }
     else {
 
         std::ofstream dest( dest_file, std::ios::binary ) ;
         dest << srce.rdbuf() ;
-    return(true);
+        return(true);
     }
 }
 
@@ -907,7 +831,7 @@ cv::Mat correctGamma( Mat& img, double gamma) {
     uchar * ptr = lut_matrix.ptr();
     for( int i = 0; i < 256; i++ ){
         ptr[i] = (int)( pow( (double) i / (255.0), inverse_gamma ) * (255.0) );
-        }
+    }
     Mat result;
     LUT( img, lut_matrix, result );
     return result;
@@ -927,23 +851,23 @@ cv::Mat LOG16(Mat& img, ushort *lut16)
     {
     case 1:
     {
-    MatIterator_<ushort> it, end;
-    for (it = dst.begin<ushort>(), end = dst.end<ushort>(); it != end; it++)
-    *it = lut16[(*it)];
-    break;
+        MatIterator_<ushort> it, end;
+        for (it = dst.begin<ushort>(), end = dst.end<ushort>(); it != end; it++)
+            *it = lut16[(*it)];
+        break;
 
     }
     case 3:
     {
-    MatIterator_<Vec3w> it, end;
+        MatIterator_<Vec3w> it, end;
 
-    for (it = dst.begin<Vec3w>(), end = dst.end<Vec3w>(); it != end; it++)
-    {
-    (*it)[0] = lut16[((*it)[0])];
-    (*it)[1] = lut16[((*it)[1])];
-    (*it)[2] = lut16[((*it)[2])];
-    }
-     break;
+        for (it = dst.begin<Vec3w>(), end = dst.end<Vec3w>(); it != end; it++)
+        {
+            (*it)[0] = lut16[((*it)[0])];
+            (*it)[1] = lut16[((*it)[1])];
+            (*it)[2] = lut16[((*it)[2])];
+        }
+        break;
     }
     }
     img = dst.clone();
@@ -953,38 +877,38 @@ cv::Mat LOG16(Mat& img, ushort *lut16)
 
 void GammaCorrection(Mat& src, Mat& dst, double fGamma )
 {
-ushort lut[4096];
-for (int i = 0; i < 4096; i++)
-{
-lut[i] = saturate_cast<ushort>(pow((double)(i / 4095.0), fGamma) * 4095.0);
-}
+    ushort lut[4096];
+    for (int i = 0; i < 4096; i++)
+    {
+        lut[i] = saturate_cast<ushort>(pow((double)(i / 4095.0), fGamma) * 4095.0);
+    }
 
-dst = src.clone();
-const int channels = dst.channels();
-switch (channels)
-{
-case 1:
-{
-MatIterator_<ushort> it, end;
-for (it = dst.begin<ushort>(), end = dst.end<ushort>(); it != end; it++)
-*it = lut[(*it)];
-break;
+    dst = src.clone();
+    const int channels = dst.channels();
+    switch (channels)
+    {
+    case 1:
+    {
+        MatIterator_<ushort> it, end;
+        for (it = dst.begin<ushort>(), end = dst.end<ushort>(); it != end; it++)
+            *it = lut[(*it)];
+        break;
 
-}
-case 3:
-{
-MatIterator_<Vec3w> it, end;
+    }
+    case 3:
+    {
+        MatIterator_<Vec3w> it, end;
 
-for (it = dst.begin<Vec3w>(), end = dst.end<Vec3w>(); it != end; it++)
-{
+        for (it = dst.begin<Vec3w>(), end = dst.end<Vec3w>(); it != end; it++)
+        {
 
-(*it)[0] = lut[((*it)[0])];
-(*it)[1] = lut[((*it)[1])];
-(*it)[2] = lut[((*it)[2])];
-}
-break;
-}
-}
+            (*it)[0] = lut[((*it)[0])];
+            (*it)[1] = lut[((*it)[1])];
+            (*it)[2] = lut[((*it)[2])];
+        }
+        break;
+    }
+    }
 }
 
 cv::Mat FilmLook(Mat& img, int kneelow, double RClow, int kneehigh, double RChigh) {
@@ -995,7 +919,7 @@ cv::Mat FilmLook(Mat& img, int kneelow, double RClow, int kneehigh, double RChig
     uchar * ptrkodak2 = lutkodak_matrix2.ptr();
     for( int i = 0; i < 256; i++ ){
         ptrkodak[i] = (int)((1/(1+ exp((double)(-(12.0/255.0)*((i-128)-0))))) * 255.0);
-     }
+    }
     Mat result, resultHSV;
     LUT( img, lutkodak_matrix, result);
     return result;
@@ -1004,27 +928,27 @@ cv::Mat FilmLook(Mat& img, int kneelow, double RClow, int kneehigh, double RChig
 
 void FilmLook16(Mat& src, Mat& dst, double kneelow, double RClow, double kneehigh, double RChigh, ushort *lutRed, ushort *lutGreen, ushort *lutBlue)
 {
-dst = src.clone();
-const int channels = dst.channels();
-switch (channels)
-{
-case 1:
-{
-break;
+    dst = src.clone();
+    const int channels = dst.channels();
+    switch (channels)
+    {
+    case 1:
+    {
+        break;
 
-}
-case 3:
-{
-MatIterator_<Vec3w> it, end;
-for (it = dst.begin<Vec3w>(), end = dst.end<Vec3w>(); it != end; it++)
-{
-(*it)[0] = lutRed[((*it)[0])];
-(*it)[1] = lutGreen[((*it)[1])];
-(*it)[2] = lutBlue[((*it)[2])];
-}
-break;
-}
-}
+    }
+    case 3:
+    {
+        MatIterator_<Vec3w> it, end;
+        for (it = dst.begin<Vec3w>(), end = dst.end<Vec3w>(); it != end; it++)
+        {
+            (*it)[0] = lutRed[((*it)[0])];
+            (*it)[1] = lutGreen[((*it)[1])];
+            (*it)[2] = lutBlue[((*it)[2])];
+        }
+        break;
+    }
+    }
 
 }
 
@@ -1076,76 +1000,111 @@ void Processing::refreshPreview()
 
 void Processing::on_playButton_clicked()
 {
+    if (m_renderUiLocked) return;
     PlayingVideo = true;
-    // Ensure devThread has the current capture context (you already set these elsewhere, but it’s safe):
-    devThread->width  = width;
-    devThread->height = height;
-    devThread->Roll   = Roll;
 
-    // Playback from current slider position to the last available frame
-    const int startAt = ui->horizontalSlider_3->value();
-    const int endAt   = imgcount;  // inclusive last index
-
-    // FPS: read from ui->fpsCombo (fallback 24 if parse fails)
     bool ok = false;
     double fps = ui->fpsCombo->currentText().toDouble(&ok);
     if (!ok || fps <= 0.0) fps = 24.0;
 
-    devThread->setRange(startAt, endAt);
-    devThread->setFps(fps);
-    devThread->setLooping(ui->loopCheck->isChecked());
+    const int intervalMs = std::max(1, int(1000.0 / fps));
 
+    int startAt = ui->horizontalSlider_3->value();
+    if (startAt < 1) {
+        startAt = 1;
+        ui->horizontalSlider_3->setValue(startAt);
+    }
 
-    devThread->play();
+    if (startAt >= imgcount && imgcount > 0)
+        ui->horizontalSlider_3->setValue(1);
+
+    m_playTimer->start(intervalMs);
 }
 
 void Processing::on_pauseButton_clicked()
 {
-    devThread->pause();
+    if (m_renderUiLocked) return;
     PlayingVideo = false;
+    if (m_playTimer)
+        m_playTimer->stop();
 }
 
 void Processing::on_stopButton_clicked()
 {
-    // Stop live playback (if any)
-    devThread->stop();
+    if (m_playTimer)
+        m_playTimer->stop();
 
-    // Also cancel an in-progress RenderToFile (safe no-op if not rendering)
+    // Altijd render cancel proberen; safe no-op als er geen render loopt
     devThread->cancelRender();
-    PlayingVideo = false;
+
+    // Als we niet aan het renderen zijn, gedraag Stop zich als gewone player-stop
+    if (!m_renderUiLocked) {
+        ui->horizontalSlider_3->setValue(1);
+    }
 }
 
 
 // While dragging, pause playback so you don't fight the timer
 void Processing::on_horizontalSlider_3_sliderPressed()
 {
-    devThread->pause();
-    PlayingVideo = false;
+    if (m_renderUiLocked) return;
+    if (m_playTimer)
+        m_playTimer->stop();
 }
 
 void Processing::on_horizontalSlider_3_valueChanged(int i)
 {
-    if(PlayingVideo || devThread->renderingBusy) return;
-    //ImgViewCount = std::max(1, i);//ensures minimum is 1
-  //   ImgViewCount = std::max(1, i);
+    if (m_renderUiLocked) return;
+    if (devThread->renderingBusy)
+        return;
+
+    if (i < 1) i = 1;
+    if (i > imgcount) i = imgcount;
 
     devThread->width  = width;
     devThread->height = height;
     devThread->Roll   = Roll;
     ImgViewCount = i;
 
-    devThread->seek(i);
-    // Optional immediate refresh (one-off render):
-    devThread->onDevelopFrame(i);
-    //emit DevelopFrame(i);
-    //PlayingVideo = false;
+    ui->label_FrameView->setNum(i);
+
+    // Belangrijk:
+    // BlockingQueuedConnection = geen preview-queue opbouwen.
+    // De UI wacht op dit ene frame en gaat daarna pas verder.
+    QMetaObject::invokeMethod(devThread,
+                              [this, i]() {
+                                  devThread->seek(i);
+                                  devThread->onDevelopFrame(i);
+                              },
+                              Qt::BlockingQueuedConnection);
 }
 
 // When the user releases the slider, resume if desired:
 void Processing::on_horizontalSlider_3_sliderReleased()
 {
-  //  if (/* was playing before drag */) devThread->play();
+    if (m_renderUiLocked) return;
+    int i = ui->horizontalSlider_3->value();
+
+    if (i < 1) i = 1;
+    if (i > imgcount) i = imgcount;
+
+    // Forceer bij loslaten altijd het echte eindframe
+    if (!devThread->renderingBusy) {
+        devThread->width  = width;
+        devThread->height = height;
+        devThread->Roll   = Roll;
+        ImgViewCount = i;
+        ui->label_FrameView->setNum(i);
+
+        QMetaObject::invokeMethod(devThread,
+                                  [this, i]() {
+                                      devThread->seek(i);
+                                      devThread->onDevelopFrame(i);
+                                  },
+                                  Qt::BlockingQueuedConnection);
+    }
 }
+
 
 void Processing::applyEmulsionPreset(const EmulsionPreset &p)
 {
@@ -1213,22 +1172,22 @@ void Processing::on_sliderSCurvePivot_valueChanged(int value)
     }
 
     // Retrigger a develop of current frame if that’s your pattern:
-     on_horizontalSlider_3_valueChanged(ImgViewCount);
+    on_horizontalSlider_3_valueChanged(ImgViewCount);
 }
 
 void Processing::on_actionExport_CinemaDNG_triggered()
 {
     // Gather some context: current roll folder, RAW files, etc.
-  //  QString defaultOutputFolder;
-  //  QStringList inputFiles;
+    //  QString defaultOutputFolder;
+    //  QStringList inputFiles;
 
     // Example: if DevelopThread knows the current roll / source folder:
     // defaultOutputFolder = m_developThread->currentRollFolder();
     // inputFiles = m_developThread->currentRawFileList();
 
     DngBatchDialog dlg(this);
-  //  dlg.setDefaultOutputFolder(defaultOutputFolder);
-  //  dlg.setInputFiles(inputFiles);
+    //  dlg.setDefaultOutputFolder(defaultOutputFolder);
+    //  dlg.setInputFiles(inputFiles);
     dlg.setModal(true);
     dlg.exec();  // modal dialog; use show() if you prefer non-modal
     //dlg.show();
@@ -1283,4 +1242,20 @@ void Processing::onThemeKodakLight()
 void Processing::onThemeKodakDark()
 {
     applyTheme("kodak_dark");
+}
+
+void Processing::setRenderUiLocked(bool locked)
+{
+    m_renderUiLocked = locked;
+
+    ui->playButton->setEnabled(!locked);
+    ui->pauseButton->setEnabled(!locked);
+    ui->Back_Button->setEnabled(!locked);
+    ui->ForwardButton->setEnabled(!locked);
+    ui->LastButton->setEnabled(!locked);
+    ui->horizontalSlider_3->setEnabled(!locked);
+    ui->actionDevelop_Film->setEnabled(!locked);
+
+    // Stop moet juist WEL actief blijven tijdens render
+    ui->stopButton->setEnabled(true);
 }

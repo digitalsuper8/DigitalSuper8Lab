@@ -1,3 +1,4 @@
+// developthread.h
 #ifndef DEVELOPTHREAD_H
 #define DEVELOPTHREAD_H
 #include "super8devparams.h"
@@ -35,31 +36,9 @@ class DevelopThread : public QObject
 public:
     explicit DevelopThread(QObject* parent = nullptr);
 
-    enum class LogMode {
-        Linear = 0,
-        Log16  = 1,
-        ArriLogC3 = 2,
-        ACEScct = 3
-    };
-
-    enum class ToneCurveMode {
-        None        = 0,
-        SCurves     = 1,
-        FilmicHable = 2,
-        Reinhard    = 3,
-        ACESLike    = 4
-    };
-
-    enum class GradingMode
-    {
-        ACES = 0,
-        Log  = 1
-    };
-
     ~DevelopThread();
 
     // Public state
-    int baseCurveMode = 0;
     int width = 0;
     int height = 0;
     int Roll = 0;
@@ -91,7 +70,6 @@ public:
     double CurveRed = 8.0, CurveGreen = 8.0, CurveBlue = 8.0;
     ushort lut16[4096] = {};
     ushort lutSCurveRed[4096] = {}, lutSCurveGreen[4096] = {}, lutSCurveBlue[4096] = {};
-    cv::Mat lut8_array, lutS_array;
     bool processingBusy_ = false;
     bool renderingBusy = false;
     float ExposureEV = 0.f;
@@ -133,13 +111,7 @@ private slots:
 private:
     cv::RNG m_rng;
     int m_currentFrameIndex = 0;
-    float m_prevLeakSlider = 0.0f;
     LeakBurstState m_leakBurst;
-
-    LogMode       m_logMode       = LogMode::Linear;
-    ToneCurveMode m_toneCurveMode = ToneCurveMode::SCurves;
-    GradingMode   m_gradingMode   = GradingMode::ACES;
-    float m_sCurvePivot = -1.0f;
 
     QPointer<QTimer> timer_;
     QElapsedTimer wallClock_;
