@@ -857,8 +857,8 @@ void DevelopThread::applySuper8Grain(cv::Mat &imgBgr)
 
     // Base amplitude
     // amount=1 -> still subtle; tune up/down here if needed
-    const float sigmaLumaBase   = 0.030f * amount; // luminance grain
-    const float sigmaChromaBase = 0.010f * amount; // much less chroma grain
+    const float sigmaLumaBase   = 0.065f * amount;
+    const float sigmaChromaBase = 0.020f * amount;
 
     // Random fields (coarse)
     cv::Mat noiseL(h / coarseH + 2, w / coarseW + 2, CV_32F);
@@ -938,222 +938,6 @@ static inline float leakEnvelope(int frameIndex, int startFrame, int length)
     }
 }
 
-// ----------------------------------------------------------
-// Vertical side leak – warm/orange, feathered band from left/right edge
-// sliderAmount01 = 0..1 from UI
-// ----------------------------------------------------------
-void DevelopThread::applySuper8LightLeakVertical(cv::Mat &imgBgr,
-                                                 int frameIndex,
-                                                 float sliderAmount01)
-{
-    const float s = std::clamp(sliderAmount01, 0.0f, 1.0f);
-    if (s <= 0.0001f) return;
-
-    const int inType = imgBgr.type();
-    const float maxVal =
-        (inType == CV_8UC3)  ? 255.0f :
-            (inType == CV_16UC3) ? 65535.0f : 0.0f;
-    if (maxVal <= 0.0f) return;
-
-    // --- Convert once to float ---
-    cv::Mat f;
-    imgBgr.convertTo(f, CV_32FC3);
-
-    const int w = f.cols;
-    const int h = f.rows;
-
-    // --- Randomize burst only on rising edge ---
-    const bool risingEdge = (!m_leakBurst.active && s > 0.0001f);
-
-    const auto now = std::chrono::steady_clock::now();
-
-    // If no burst active, optionally start one (if cooldown expired)
-    if (!m_leakBurst.active && risingEdge && now >= m_leakBurst.nextAllowed)
-    {
-        m_leakBurst.active = true;
-        m_leakBurst.phaseFrame = frameIndex;
-
-        // Durations in frames (small randomization feels more analog)
-        m_leakBurst.rampUp   = m_rng.uniform(3, 7);   // 3..6
-        m_leakBurst.hold     = m_rng.uniform(3, 8);   // 3..7
-        m_leakBurst.rampDown = m_rng.uniform(5, 10);  // 5..9
-
-        // Side: 0 left, 1 right
-        m_leakBurst.side = (m_rng.uniform(0, 2) == 0) ? 0 : 1;
-
-        // Band center measured from chosen edge in normalized coordinates.
-        // Keep center close-ish to the edge.
-        m_leakBurst.bandCenter = m_rng.uniform(0.04f, 0.18f);
-
-        // Band width normalized
-        m_leakBurst.bandWidth = m_rng.uniform(0.10f, 0.22f);
-
-        // Bloom softness
-        m_leakBurst.sigmaBloom = m_rng.uniform(0.04f, 0.10f);
-
-        // Overall burst multiplier
-        m_leakBurst.strengthMul = m_rng.uniform(0.80f, 1.25f);
-    }
-
-    // Also allow the planned leak list to trigger bursts automatically,
-    // even if the slider isn't being "touched" right now.
-    float plannedEnv = 0.0f;
-    {
-        Super8DevParams p;
-        {
-            QMutexLocker lock(&m_super8Mutex);
-            p = m_super8;
-        }
-        plannedEnv = plannedLeakEnvelope(frameIndex, p);
-    }
-
-    if (!m_leakBurst.active && plannedEnv > 0.0001f && now >= m_leakBurst.nextAllowed)
-    {
-        m_leakBurst.active = true;
-        m_leakBurst.phaseFrame = frameIndex;
-
-        m_leakBurst.rampUp   = 2;
-        m_leakBurst.hold     = 4;
-        m_leakBurst.rampDown = 5;
-
-        m_leakBurst.side = (m_rng.uniform(0, 2) == 0) ? 0 : 1;
-        m_leakBurst.bandCenter  = m_rng.uniform(0.04f, 0.16f);
-        m_leakBurst.bandWidth   = m_rng.uniform(0.10f, 0.20f);
-        m_leakBurst.sigmaBloom  = m_rng.uniform(0.04f, 0.09f);
-        m_leakBurst.strengthMul = m_rng.uniform(0.85f, 1.15f);
-    }
-
-    // If still nothing active, we're done
-    if (!m_leakBurst.active) {
-        return;
-    }
-
-    // --- Compute burst phase envelope ---
-    const int t = frameIndex - m_leakBurst.phaseFrame;
-    const int totalLen = m_leakBurst.rampUp + m_leakBurst.hold + m_leakBurst.rampDown;
-
-    float env = 0.0f;
-    if (t < 0 || t >= totalLen) {
-        // End burst and set cooldown
-        m_leakBurst.active = false;
-
-        const int cooldownMs = m_rng.uniform(1500, 5000); // 1.5–5 sec
-        m_leakBurst.nextAllowed = now + std::chrono::milliseconds(cooldownMs);
-        return;
-    }
-    else if (t < m_leakBurst.rampUp) {
-        env = float(t + 1) / float(std::max(1, m_leakBurst.rampUp));
-    }
-    else if (t < m_leakBurst.rampUp + m_leakBurst.hold) {
-        env = 1.0f;
-    }
-    else {
-        const int td = t - (m_leakBurst.rampUp + m_leakBurst.hold);
-        env = 1.0f - float(td + 1) / float(std::max(1, m_leakBurst.rampDown));
-    }
-
-    // Combine user slider + planned leak envelope:
-    // - slider gives the base intensity users expect
-    // - plannedEnv boosts/creates leaks at specified frames
-    const float baseUser = s;
-    const float basePlanned = plannedEnv;
-    const float baseAmount = std::max(baseUser, basePlanned);
-
-    // Final strength with some randomized burst character
-    const float A = std::clamp(baseAmount * env * m_leakBurst.strengthMul, 0.0f, 1.0f);
-    if (A <= 0.0001f) return;
-
-    // --- Build edge-distance field [0..1] from the chosen edge ---
-    cv::Mat edgeDist(1, w, CV_32F);
-    for (int x = 0; x < w; ++x)
-    {
-        float xn = float(x) / float(std::max(1, w - 1)); // left->right 0..1
-        if (m_leakBurst.side == 1) {
-            xn = 1.0f - xn; // measure from right edge
-        }
-        edgeDist.at<float>(0, x) = xn;
-    }
-
-    // --- Leak profile across width ---
-    // A warm band near the edge, plus exponential bloom.
-    cv::Mat leak1D(1, w, CV_32F, cv::Scalar(0));
-
-    const float c = m_leakBurst.bandCenter;
-    const float bw = std::max(0.02f, m_leakBurst.bandWidth);
-    const float sig = std::max(0.01f, m_leakBurst.sigmaBloom);
-
-    for (int x = 0; x < w; ++x)
-    {
-        const float d = edgeDist.at<float>(0, x); // 0 at edge, larger inward
-
-        // Gaussian-ish band centered near edge
-        const float band = std::exp(-0.5f * ((d - c) * (d - c)) / (bw * bw));
-
-        // Stronger bloom from edge inward
-        const float bloom = std::exp(-d / sig);
-
-        // Mix: edge bloom + band
-        const float v = 0.65f * bloom + 0.75f * band;
-        leak1D.at<float>(0, x) = v;
-    }
-
-    // Normalize to 0..1
-    double minv = 0.0, maxv = 1.0;
-    cv::minMaxLoc(leak1D, &minv, &maxv);
-    if (maxv > 1e-6) leak1D /= float(maxv);
-
-    // Expand vertically
-    cv::Mat mask;
-    cv::repeat(leak1D, h, 1, mask);
-
-    // --- Add a little vertical irregularity so it feels organic ---
-    cv::Mat vNoise(h, 1, CV_32F);
-    cv::randn(vNoise, 0.0f, 1.0f);
-    cv::GaussianBlur(vNoise, vNoise, cv::Size(1, 0), 6.0); // smooth vertical wobble
-
-    // Normalize vNoise to about 0.85..1.15
-    double nMin = 0.0, nMax = 1.0;
-    cv::minMaxLoc(vNoise, &nMin, &nMax);
-    if ((nMax - nMin) > 1e-6) {
-        vNoise = (vNoise - float(nMin)) / float(nMax - nMin); // 0..1
-    }
-    vNoise = 0.85f + 0.30f * vNoise;
-
-    cv::Mat vScale;
-    cv::repeat(vNoise, 1, w, vScale);
-    mask = mask.mul(vScale);
-
-    // Slight blur for softness
-    cv::GaussianBlur(mask, mask, cv::Size(0,0), 1.5, 0.0);
-
-    // --- Apply warm leak in BGR ---
-    // More red than green, very little blue.
-    // Tune these if you want more yellow/orange/red.
-    const float addB = 0.08f * A * maxVal;
-    const float addG = 0.26f * A * maxVal;
-    const float addR = 0.62f * A * maxVal;
-
-    std::vector<cv::Mat> ch(3);
-    cv::split(f, ch);
-
-    ch[0] += mask * addB; // B
-    ch[1] += mask * addG; // G
-    ch[2] += mask * addR; // R
-
-    cv::merge(ch, f);
-
-    // Optional: a tiny lift in the whole image during heavy leak
-    // to mimic internal flare (very subtle)
-    if (A > 0.25f) {
-        f *= (1.0f + 0.04f * (A - 0.25f));
-    }
-
-    // Clamp and convert back
-    cv::min(f, maxVal, f);
-    cv::max(f, 0.0f, f);
-    f.convertTo(imgBgr, inType);
-}
-
 void DevelopThread::applySuper8LightLeak(cv::Mat &imgBgr)
 {
     Super8DevParams p;
@@ -1164,13 +948,204 @@ void DevelopThread::applySuper8LightLeak(cv::Mat &imgBgr)
 
     if (!p.enabled) return;
 
-    // your slider comes in as 0..1
-    const float s = clamp02(p.lightLeak);
+    const float s = clamp02(p.lightLeak);   // 0..1
     if (s <= 0.0001f) return;
 
-    // Reuse your existing vertical leak implementation,
-    // but now the effect is bursty / not constant.
-    applySuper8LightLeakVertical(imgBgr, m_currentFrameIndex, s);
+    const int inType = imgBgr.type();
+    const float maxVal =
+        (inType == CV_8UC3)  ? 255.0f :
+            (inType == CV_16UC3) ? 65535.0f : 0.0f;
+    if (maxVal <= 0.0f) return;
+
+    cv::Mat f;
+    imgBgr.convertTo(f, CV_32FC3);
+
+    const int w = f.cols;
+    const int h = f.rows;
+    const int frameIndex = std::max(0, m_currentFrameIndex);
+
+    // ------------------------------------------------------------
+    // RANDOM TIMING, LESS OFTEN:
+    // We test for a burst start every 4 frames.
+    // Chance is tuned to roughly ~1 burst per ~2 sec average at 18 fps,
+    // but randomized in time.
+    // No extra state variables needed.
+    // ------------------------------------------------------------
+    const int startStep = 4;         // candidate start every 4 frames
+    const int lookback  = 64;        // search recent possible starts
+    const int fpsHint   = 18;        // expected playback fps feel
+
+    auto hash32 = [](uint32_t x) -> uint32_t {
+        x ^= x >> 16;
+        x *= 0x7feb352dU;
+        x ^= x >> 15;
+        x *= 0x846ca68bU;
+        x ^= x >> 16;
+        return x;
+    };
+
+    bool burstActive = false;
+    int  burstStart = 0;
+    int  burstDuration = 0;
+    int  mode = 0;          // 0=left, 1=right, 2=center
+    float strengthJitter = 1.0f;
+    uint32_t burstSeed = 0;
+
+    // Find most recent active burst start in the recent past
+    const int startScan = std::max(0, frameIndex - lookback);
+    for (int cand = frameIndex - (frameIndex % startStep); cand >= startScan; cand -= startStep)
+    {
+        uint32_t h0 = hash32(uint32_t(cand) * 9781u + 0xA53u);
+
+        // About 1 in 9 candidate blocks start a burst:
+        // 18 fps / 4 = 4.5 checks per sec => 1 burst about every ~2 sec average
+        const bool startsHere = ((h0 % 9u) == 0u);
+        if (!startsHere)
+            continue;
+
+        burstSeed = hash32(uint32_t(cand) * 1237u + 0xBEEF1234u);
+
+        // Random duration: ~9..22 frames
+        burstDuration = 6 + int(burstSeed % 10u);
+
+        if (frameIndex < cand || frameIndex >= cand + burstDuration)
+            continue;
+
+        burstActive = true;
+        burstStart = cand;
+
+        mode = int((burstSeed >> 8) % 3u); // 0=left,1=right,2=center
+
+        // modest random strength variation
+        strengthJitter = 0.80f + 0.40f * float((burstSeed >> 12) & 1023u) / 1023.0f;
+        break;
+    }
+
+    if (!burstActive)
+        return;
+
+    // ------------------------------------------------------------
+    // Burst envelope
+    // ------------------------------------------------------------
+    const int localFrame = frameIndex - burstStart;
+    const float u = (burstDuration > 1)
+                        ? float(localFrame) / float(burstDuration - 1)
+                        : 0.0f;
+
+    // Smooth in/out
+    const float env = std::sin(3.14159265f * u);
+
+    // subtle breathing
+    const float breathe = 0.94f + 0.10f * std::sin(6.2831853f * u);
+
+    // Slider now strongly controls overall intensity too
+    const float A = std::clamp((0.28f + 1.55f * s) * strengthJitter * env * breathe,
+                               0.0f, 2.2f);
+
+    cv::RNG rng(burstSeed);
+
+    // ------------------------------------------------------------
+    // Build 1D horizontal leak profile
+    // Slider strongly affects WIDTH/SPREAD now.
+    // At max slider, leak can fill almost/all of the frame.
+    // ------------------------------------------------------------
+    cv::Mat leak1D(1, w, CV_32F, cv::Scalar(0));
+
+    if (mode == 0 || mode == 1)
+    {
+        const bool fromLeft = (mode == 0);
+
+        // Wider with higher slider:
+        // at s=0 small edge leak, at s=1 it can spread almost fully.
+        const float edgeDecay  = (0.06f + 0.52f * s) * rng.uniform(0.92f, 1.08f);
+        const float bandCenter = rng.uniform(0.04f, 0.14f + 0.55f * s);
+        const float bandWidth  = (0.05f + 0.55f * s) * rng.uniform(0.90f, 1.10f);
+
+        for (int x = 0; x < w; ++x)
+        {
+            float xn = float(x) / float(std::max(1, w - 1)); // 0..1
+            if (!fromLeft) xn = 1.0f - xn;
+
+            const float edge = std::exp(-xn / std::max(0.0001f, edgeDecay));
+            const float band = std::exp(-0.5f * ((xn - bandCenter) * (xn - bandCenter)) /
+                                        std::max(0.0001f, bandWidth * bandWidth));
+
+            // At high slider, allow a much broader wash over the whole frame
+            const float broad = std::exp(-0.5f * (xn * xn) /
+                                         std::max(0.0001f, (0.18f + 0.95f * s) * (0.18f + 0.95f * s)));
+
+            leak1D.at<float>(0, x) = 0.82f * edge + 0.72f * band + 0.60f * s * broad;
+        }
+    }
+    else
+    {
+        // CENTER leak
+        const float center = rng.uniform(0.34f, 0.66f);
+
+        // At max slider, center leak can fill almost the full frame
+        const float width1 = (0.07f + 0.28f * s) * rng.uniform(0.94f, 1.08f);
+        const float width2 = (0.14f + 0.85f * s) * rng.uniform(0.94f, 1.08f);
+
+        for (int x = 0; x < w; ++x)
+        {
+            const float xn = float(x) / float(std::max(1, w - 1));
+
+            const float core =
+                std::exp(-0.5f * ((xn - center) * (xn - center)) /
+                         std::max(0.0001f, width1 * width1));
+
+            const float glow =
+                std::exp(-0.5f * ((xn - center) * (xn - center)) /
+                         std::max(0.0001f, width2 * width2));
+
+            // Extra very broad component so max slider can wash the whole image
+            const float wash =
+                std::exp(-0.5f * ((xn - center) * (xn - center)) /
+                         std::max(0.0001f, (0.30f + 1.05f * s) * (0.30f + 1.05f * s)));
+
+            leak1D.at<float>(0, x) = 0.95f * core + 0.55f * glow + 0.70f * s * wash;
+        }
+    }
+
+    double minv = 0.0, maxv1 = 1.0;
+    cv::minMaxLoc(leak1D, &minv, &maxv1);
+    if (maxv1 > 1e-6)
+        leak1D /= float(maxv1);
+
+    cv::Mat mask;
+    cv::repeat(leak1D, h, 1, mask);
+
+    // Keep it smooth and even: no visible horizontal banding
+    cv::GaussianBlur(mask, mask, cv::Size(0,0), 8.0, 2.5);
+
+    // ------------------------------------------------------------
+    // Warm orange-yellow tint
+    // Slightly stronger than before
+    // BGR order
+    // ------------------------------------------------------------
+    const float addB = 0.04f * A * maxVal;
+    const float addG = 0.40f * A * maxVal;
+    const float addR = 0.95f * A * maxVal;
+
+    std::vector<cv::Mat> ch(3);
+    cv::split(f, ch);
+
+    ch[0] += mask * addB; // B
+    ch[1] += mask * addG; // G
+    ch[2] += mask * addR; // R
+
+    cv::merge(ch, f);
+
+    // Global flare lift:
+    // with high slider + strong burst this can wash the whole frame
+    if (A > 0.10f) {
+        const float flareLift = 1.0f + (0.03f + 0.26f * s) * (A - 0.10f);
+        f *= flareLift;
+    }
+
+    cv::min(f, maxVal, f);
+    cv::max(f, 0.0f, f);
+    f.convertTo(imgBgr, inType);
 }
 
 void DevelopThread::applyLeakMask(cv::Mat &imgBgr, int frameIndex, float A)
@@ -1273,19 +1248,18 @@ void DevelopThread::applyScratches(cv::Mat &imgBgr, int frameIndex)
     const int h = f.rows;
 
     // ---- deterministic RNG per short block so scratches persist across 2–3 frames ----
-    const int blockSize = 3;                // persistence length
-    const int blockId   = frameIndex / blockSize;
-    const int phase     = frameIndex % blockSize;
+    const int blockSize = 1;
+    const int phase     = 0;
 
-    cv::RNG rng(uint64_t(blockId) * 1103515245u + 12345u);
+    cv::RNG rng(uint64_t(frameIndex) * 1103515245u + 12345u);
 
-    // ---- scratch count: more natural, still bounded ----
-    int count = int((w / 420.0f) * (0.35f + 2.1f * s));
-    count = std::clamp(count, 0, std::max(1, w / 60));
+    // ---- scratch count: let slider mainly control HOW MANY ----
+    int count = int((w / 420.0f) * (0.20f + 3.20f * s));
+    count = std::clamp(count, 0, std::max(1, w / 42));
 
-    // very rare extra scratch burst
-    if (rng.uniform(0, 100) < int(8 * s)) {
-        count += rng.uniform(1, 3);
+    // slightly more frequent extra burst at higher settings
+    if (rng.uniform(0, 100) < int(12 * s)) {
+        count += rng.uniform(1, 4);
     }
 
     // Masks for dark scratches + optional blue tint scratches
@@ -1302,12 +1276,11 @@ void DevelopThread::applyScratches(cv::Mat &imgBgr, int frameIndex)
         const int slant = rng.uniform(-2, 3);
         const int xEnd  = std::clamp(x0 + slant, 0, w - 1);
 
-        // Thickness: mostly thin, sometimes a bit thicker
+        // Thickness: keep max thinner than before
         int thickness = 1
-                        + ((rng.uniform(0, 100) < 20) ? 1 : 0)
-                        + ((rng.uniform(0, 100) <  8) ? 1 : 0);
-        thickness = std::max(1, (int)std::round(thickness * (0.8f + 0.6f * resScale)));
-        thickness = std::min(thickness, 2); // or 3 for 4K
+                        + ((rng.uniform(0, 100) < 12) ? 1 : 0);   // rarer 2px scratches
+        thickness = std::max(1, (int)std::round(thickness * (0.70f + 0.35f * resScale)));
+        thickness = std::min(thickness, 1); // hard cap: keep scratches thin
 
         // Strength per scratch
         const float strength = std::clamp(0.15f + 0.85f * rng.uniform(0.0f, 1.0f), 0.0f, 1.0f);
@@ -1325,7 +1298,7 @@ void DevelopThread::applyScratches(cv::Mat &imgBgr, int frameIndex)
         k = std::clamp(k * breathe, 0.0f, 1.0f);
 
         // Occasionally a bluish scratch (rare)
-        const bool bluish = (rng.uniform(0, 100) < 14);
+        const bool bluish = (rng.uniform(0, 100) < 50);
 
         // --- variable continuous length (no dashes) ---
         const float minLenFrac = 0.40f; // 40% of frame height
@@ -1373,7 +1346,12 @@ void DevelopThread::applyScratches(cv::Mat &imgBgr, int frameIndex)
 
     // Apply: black scratches mostly darken; bluish scratches also tint slightly blue.
     const float blackGain = 0.85f;  // overall darkness
-    const float blueTint  = 0.35f;  // how "blue" the rare blue scratches become
+
+    // More blue-green / cyan emulsion-damage look
+    const float cyanTint  = 0.7f;  // total tint strength
+    const float cyanB     = 1.00f;  // strong blue
+    const float cyanG     = 0.72f;  // much more green than before
+    const float cyanR     = 0.03f;  // keep red very low
 
     std::vector<cv::Mat> ch(3);
     cv::split(f, ch);
@@ -1387,16 +1365,16 @@ void DevelopThread::applyScratches(cv::Mat &imgBgr, int frameIndex)
     ch[1] = ch[1].mul(darkFactor);
     ch[2] = ch[2].mul(darkFactor);
 
-    // Bluish tint: add to Blue channel a bit, very subtle to G/R
+    // Blue-green / cyan tint for emulsion-like scratches
     if (cv::countNonZero(maskBlue > 0.0005f) > 0)
     {
-        cv::Mat bAdd = maskBlue * (blueTint * maxVal);
-        cv::Mat gAdd = maskBlue * (0.08f * blueTint * maxVal);
-        cv::Mat rAdd = maskBlue * (0.02f * blueTint * maxVal);
+        cv::Mat bAdd = maskBlue * (cyanTint * cyanB * maxVal);
+        cv::Mat gAdd = maskBlue * (cyanTint * cyanG * maxVal);
+        cv::Mat rAdd = maskBlue * (cyanTint * cyanR * maxVal);
 
-        ch[0] += bAdd;
-        ch[1] += gAdd;
-        ch[2] += rAdd;
+        ch[0] += bAdd; // B
+        ch[1] += gAdd; // G
+        ch[2] += rAdd; // R
     }
 
     cv::merge(ch, f);
@@ -1431,8 +1409,8 @@ void DevelopThread::drawSoftDust(cv::Mat& f32bgr, int cx, int cy, float radiusPx
     const float uC = hash01(cx, cy, 3);
 
     // Ellipse axes
-    float sx = std::max(0.20f, radiusPx * (0.70f + 0.90f * uA));
-    float sy = std::max(0.20f, radiusPx * (0.70f + 0.90f * uB));
+    float sx = std::max(0.16f, radiusPx * (0.48f + 0.62f * uA));
+    float sy = std::max(0.16f, radiusPx * (0.48f + 0.62f * uB));
 
     // Rotation angle [0..2pi)
     const float ang = 6.28318530718f * uC;
@@ -1506,7 +1484,6 @@ static inline void drawDustFiber(cv::Mat& f32bgr, int x0, int y0, int len, float
 
 void DevelopThread::applyDust(cv::Mat& imgBgr, int frameIndex)
 {
-
     Super8DevParams p;
     {
         QMutexLocker lock(&m_super8Mutex);
@@ -1514,8 +1491,7 @@ void DevelopThread::applyDust(cv::Mat& imgBgr, int frameIndex)
     }
     if (!p.enabled) return;
 
-    float amount = clamp02(p.dust); // 0..1 from slider
-
+    const float amount = clamp02(p.dust); // 0..1 from slider
     if (amount <= 0.0001f) return;
 
     const int inType = imgBgr.type();
@@ -1532,46 +1508,44 @@ void DevelopThread::applyDust(cv::Mat& imgBgr, int frameIndex)
     const int h = f.rows;
 
     // ---- RNG (deterministic per frame) ----
-    // Mix frameIndex into seed; add a constant so frameIndex=0 still yields "random"
     std::mt19937 rng(uint32_t(frameIndex * 11027u + 12345u));
 
     std::uniform_int_distribution<int> ix(0, w - 1);
     std::uniform_int_distribution<int> iy(0, h - 1);
     std::uniform_real_distribution<float> u01(0.0f, 1.0f);
-    std::uniform_real_distribution<float> rad(0.7f, 2.2f);
+    std::uniform_real_distribution<float> angle01(0.0f, 6.28318530718f);
+
+    // Radius grows with slider, but not absurdly
+    std::uniform_real_distribution<float> radSmall(0.55f, 1.10f + 1.70f * amount);
+    std::uniform_real_distribution<float> radLarge(1.00f, 2.10f + 3.60f * amount);
 
     // ---- Density model ----
-    // Tune: bigger denominator -> fewer specks.
-    // amount scales the count linearly.
-    int count = int((double(w) * double(h) / 70000.0) * double(amount));
+    // More specs as slider increases
+    int count = int((double(w) * double(h) / 90000.0) * double(0.20f + 4.40f * amount));
+    count = std::clamp(count, 0, 5000);
 
-    // keep sane bounds (prevents “dust storms” on huge frames if slider is high)
-    count = std::clamp(count, 0, 2500);
+    // 50/50 bright vs dark
+    const float brightProb = 0.50f;
 
-    // Rare bright “pinholes” (2–5% usually feels right)
-    const float brightProb = 0.1; // 3%
+    // Similar strength both ways
+    const float darkDeltaBase   = -0.26f * amount * maxVal;
+    const float brightDeltaBase =  0.22f * amount * maxVal;
 
-    // Strength tuning (dark dust scales with amount; bright is rare and fairly strong)
-    //const float darkDeltaBase   = -0.30f * amount * maxVal;  // subtractive
-    const float darkDeltaBase   = -0.30f * 0.15 * maxVal;  // subtractive
-    const float brightDeltaBase =  0.55f * maxVal;           // additive, rare
+    std::uniform_real_distribution<float> darkScale(0.75f, 1.15f);
+    std::uniform_real_distribution<float> brightScale(0.75f, 1.10f);
 
-    std::uniform_real_distribution<float> darkScale(0.65f, 1.05f);
-    std::uniform_real_distribution<float> brightScale(0.50f, 1.00f);
-
-    // Optional: a few short fibers/hairs when slider is up
+    // More fibers/hairs when slider goes up
     int fiberCount = 0;
-    if (amount > 0.20f) {
-        fiberCount = int((w * h / 400000.0) * amount);  // very sparse
-        fiberCount = std::clamp(fiberCount, 0, 15);
+    if (amount > 0.03f) {
+        fiberCount = int((w * h / 220000.0) * (0.25f + 4.50f * amount));
+        fiberCount = std::clamp(fiberCount, 0, 120);
     }
 
-    // Specks
+    // Specks / blobs / blotches
     for (int i = 0; i < count; ++i)
     {
         const int x = ix(rng);
         const int y = iy(rng);
-        const float r = rad(rng);
 
         const bool bright = (u01(rng) < brightProb);
 
@@ -1579,37 +1553,64 @@ void DevelopThread::applyDust(cv::Mat& imgBgr, int frameIndex)
                           ? (brightDeltaBase * brightScale(rng))
                           : (darkDeltaBase   * darkScale(rng));
 
-        // Dark specks slightly stronger in highlights than shadows
-        if (!bright) {
-            const cv::Vec3f& pix = f.at<cv::Vec3f>(y, x);
-            const float lum = (pix[0] + pix[1] + pix[2]) / (3.0f * maxVal); // 0..1
-            delta *= (0.45f + 0.85f * lum);
+        const float t = u01(rng);
+
+        if (t < 0.58f)
+        {
+            // small speck
+            const float r = radSmall(rng);
+            drawSoftDust(f, x, y, r, delta, maxVal);
         }
+        else if (t < 0.86f)
+        {
+            // irregular blotch made of a few overlapping blobs
+            const int n = 2 + int(u01(rng) * 3.0f); // 2..4 sub-blobs
+            const float baseR = radLarge(rng);
 
-        drawSoftDust(f, x, y, r, delta, maxVal);
+            for (int k = 0; k < n; ++k)
+            {
+                const float a = angle01(rng);
+                const float d = (0.15f + 0.85f * u01(rng)) * baseR;
 
-        // Very rare halo around bright pinholes
-        if (bright && u01(rng) < 0.22f) {
-            drawSoftDust(f, x, y, r * 2.2f, 0.10f * maxVal, maxVal);
+                const int bx = int(std::round(x + std::cos(a) * d));
+                const int by = int(std::round(y + std::sin(a) * d));
+
+                const float rr = baseR * (0.50f + 0.55f * u01(rng));
+                const float dd = delta * (0.80f + 0.30f * u01(rng));
+
+                drawSoftDust(f, bx, by, rr, dd, maxVal);
+            }
+        }
+        else
+        {
+            // medium blob
+            const float r = radLarge(rng);
+            drawSoftDust(f, x, y, r, delta, maxVal);
         }
     }
 
     // Fibers / hairs
-    if (fiberCount > 0) {
-        std::uniform_int_distribution<int> lenD(2, 10);
-        std::uniform_real_distribution<float> angD(0.0f, 6.28318530718f);
-        for (int i = 0; i < fiberCount; ++i) {
-            const int x = ix(rng);
-            const int y = iy(rng);
-            const int len = lenD(rng);
-            const float ang = angD(rng);
+    if (fiberCount > 0)
+    {
+        std::uniform_int_distribution<int> lenDist(4, int(10 + 34 * amount));
+        std::uniform_real_distribution<float> angDist(0.0f, 6.28318530718f);
 
-            float delta = darkDeltaBase * (0.7f + 0.4f * u01(rng));
-            drawDustFiber(f, x, y, len, ang, delta, maxVal);
+        for (int i = 0; i < fiberCount; ++i)
+        {
+            const int x0 = ix(rng);
+            const int y0 = iy(rng);
+            const int len = lenDist(rng);
+            const float ang = angDist(rng);
+
+            const bool bright = (u01(rng) < brightProb);
+            const float delta = bright
+                                    ? (brightDeltaBase * 0.50f * brightScale(rng))
+                                    : (darkDeltaBase   * 0.90f * darkScale(rng));
+
+            drawDustFiber(f, x0, y0, len, ang, delta, maxVal);
         }
     }
 
-    // Clamp and convert back
     cv::min(f, maxVal, f);
     cv::max(f, 0.0f, f);
     f.convertTo(imgBgr, inType);

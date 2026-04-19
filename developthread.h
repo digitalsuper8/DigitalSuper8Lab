@@ -133,7 +133,7 @@ private:
 
     void applySuper8Grain(cv::Mat &imgBgr);
     void applySuper8LightLeak(cv::Mat &imgBgr);
-    void applySuper8LightLeakVertical(cv::Mat &imgBgr, int frameIndex, float sliderAmount01);
+
     void applyScratches(cv::Mat &imgBgr, int frameIndex);
     void drawSoftDust(cv::Mat& f32bgr, int cx, int cy, float radiusPx, float delta, float maxVal);
     void applyDust(cv::Mat& imgBgr, int frameIndex);
