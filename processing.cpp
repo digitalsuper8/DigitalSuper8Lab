@@ -271,8 +271,7 @@ Processing::Processing(QWidget *parent) :
 
     connect(this, &Processing::super8DevParamsChanged,
             devThread, &DevelopThread::setSuper8DevParams,
-            Qt::QueuedConnection);
-
+            Qt::DirectConnection);//Op deze manier heeft schuiven met slider direct invloed tijdens developFilm
 
 
     // start the worker thread’s event loop

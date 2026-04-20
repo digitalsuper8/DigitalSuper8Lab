@@ -55,38 +55,111 @@ static bool readNextToken(QFile &f, QByteArray &tok)
 bool DngBatchConverterTiny::readPgm16(const QString &path, PgmInfo *info, QByteArray *pixelBytes, QString *err)
 {
     QFile f(path);
-    if (!f.open(QIODevice::ReadOnly)) { if (err) *err = QStringLiteral("Cannot open %1").arg(path); return false; }
+    if (!f.open(QIODevice::ReadOnly)) {
+        if (err) *err = QStringLiteral("Cannot open %1").arg(path);
+        return false;
+    }
 
     QByteArray tok;
-    if (!readNextToken(f, tok) || tok != "P5") { if (err) *err = QStringLiteral("PGM magic P5 not found in %1").arg(path); return false; }
 
-    if (!readNextToken(f, tok)) { if (err) *err = QStringLiteral("PGM width missing: %1").arg(path); return false; }
-    bool ok=false; int w = tok.toInt(&ok); if (!ok) { if (err) *err = QStringLiteral("Bad width in %1").arg(path); return false; }
+    // Magic
+    if (!readNextToken(f, tok) || tok != "P5") {
+        if (err) *err = QStringLiteral("PGM magic P5 not found in %1").arg(path);
+        return false;
+    }
 
-    if (!readNextToken(f, tok)) { if (err) *err = QStringLiteral("PGM height missing: %1").arg(path); return false; }
-    int h = tok.toInt(&ok); if (!ok) { if (err) *err = QStringLiteral("Bad height in %1").arg(path); return false; }
+    // Width
+    if (!readNextToken(f, tok)) {
+        if (err) *err = QStringLiteral("PGM width missing: %1").arg(path);
+        return false;
+    }
+    bool ok = false;
+    int w = tok.toInt(&ok);
+    if (!ok || w <= 0) {
+        if (err) *err = QStringLiteral("Bad width in %1").arg(path);
+        return false;
+    }
 
-    if (!readNextToken(f, tok)) { if (err) *err = QStringLiteral("PGM maxval missing: %1").arg(path); return false; }
-    int maxv = tok.toInt(&ok); if (!ok) { if (err) *err = QStringLiteral("Bad maxval in %1").arg(path); return false; }
+    // Height
+    if (!readNextToken(f, tok)) {
+        if (err) *err = QStringLiteral("PGM height missing: %1").arg(path);
+        return false;
+    }
+    int h = tok.toInt(&ok);
+    if (!ok || h <= 0) {
+        if (err) *err = QStringLiteral("Bad height in %1").arg(path);
+        return false;
+    }
 
-    // After maxval, there is a single whitespace before binary data. Consume one char if it's whitespace.
-    char sep = 0; if (f.peek(&sep,1)==1 && isspace(static_cast<unsigned char>(sep))) { char dummy; f.getChar(&dummy); }
+    // Maxval
+    if (!readNextToken(f, tok)) {
+        if (err) *err = QStringLiteral("PGM maxval missing: %1").arg(path);
+        return false;
+    }
+    int maxv = tok.toInt(&ok);
+    if (!ok || maxv <= 0 || maxv > 65535) {
+        if (err) *err = QStringLiteral("Bad maxval in %1").arg(path);
+        return false;
+    }
 
-    info->width = w; info->height = h; info->maxval = maxv; info->bigEndian = true; info->headerBytes = f.pos();
+    // BELANGRIJK:
+    // readNextToken() heeft de afsluitende whitespace na maxval al geconsumeerd.
+    // Dus hier GEEN extra whitespace-byte meer lezen.
 
-    const qint64 expectedBytes = qint64(w) * qint64(h) * 2;
-    QByteArray data = f.read(expectedBytes);
-    if (data.size() != expectedBytes) { if (err) *err = QStringLiteral("Unexpected EOF in %1").arg(path); return false; }
+    info->width = w;
+    info->height = h;
+    info->maxval = maxv;
+    info->bigEndian = true;   // PGM >8-bit is big-endian by spec
+    info->headerBytes = f.pos();
 
-    // Convert BE->LE (PGM 16-bit is BE by spec)
-    quint16 *p = reinterpret_cast<quint16*>(data.data());
-    const int count = w*h;
-    for (int i=0;i<count;i++) p[i] = qFromBigEndian(p[i]);
+    const int bytesPerSample = (maxv > 255) ? 2 : 1;
+    const qint64 sampleCount = qint64(w) * qint64(h);
+    const qint64 expectedBytes = sampleCount * bytesPerSample;
 
-    *pixelBytes = std::move(data);
-    return true;
+    QByteArray raw = f.read(expectedBytes);
+    if (raw.size() != expectedBytes) {
+        if (err) {
+            *err = QStringLiteral("Unexpected EOF in %1 (expected %2 data bytes, got %3)")
+            .arg(path)
+                .arg(expectedBytes)
+                .arg(raw.size());
+        }
+        return false;
+    }
+
+    // Optioneel: check op trailing bytes
+    // Niet fout maken, alleen eventueel waarschuwen/debuggen.
+    // qint64 trailing = f.bytesAvailable();
+
+    if (bytesPerSample == 2) {
+        // 16-bit PGM payload is big-endian; convert to little-endian host/order for downstream use.
+        QByteArray data = std::move(raw);
+        quint16 *p = reinterpret_cast<quint16 *>(data.data());
+        const qint64 count = sampleCount;
+
+        for (qint64 i = 0; i < count; ++i) {
+            p[i] = qFromBigEndian(p[i]);
+        }
+
+        *pixelBytes = std::move(data);
+        return true;
+    } else {
+        // 8-bit PGM: expand to 16-bit little-endian so downstream always receives quint16 pixels.
+        QByteArray data;
+        data.resize(int(sampleCount * 2));
+
+        const uchar *src = reinterpret_cast<const uchar *>(raw.constData());
+        quint16 *dst = reinterpret_cast<quint16 *>(data.data());
+
+        for (qint64 i = 0; i < sampleCount; ++i) {
+            dst[i] = quint16((uint32_t(src[i]) * 4095u + 127u) / 255u);
+        }
+
+        info->bigEndian = false; // expanded output buffer is now native little-endian style for your code path
+        *pixelBytes = std::move(data);
+        return true;
+    }
 }
-
 QFileInfoList DngBatchConverterTiny::sortedPgmList(const QDir &dir, const QString &glob) {
     QFileInfoList list = dir.entryInfoList(QStringList{glob}, QDir::Files, QDir::Name);
     std::sort(list.begin(), list.end(), [](const QFileInfo &a, const QFileInfo &b){

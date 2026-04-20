@@ -753,7 +753,24 @@ void DevelopThread::onDevelopFrame(int i)
     cv::flip(imgBGR, imgBGR, -1);
 
     // ------------------------------------------------------------
-    // Keep your current Super8 post effects
+    // Normalize Super8 effect scale:
+    // always apply effects on a fixed reference height, preserving aspect ratio
+    // ------------------------------------------------------------
+    {
+        const int effectRefHeight = 1080;
+
+        if (imgBGR.rows > 0 && imgBGR.rows != effectRefHeight) {
+            const double scale = double(effectRefHeight) / double(imgBGR.rows);
+            const int targetW = std::max(1, int(std::round(imgBGR.cols * scale)));
+            cv::resize(imgBGR, imgBGR,
+                       cv::Size(targetW, effectRefHeight),
+                       0.0, 0.0,
+                       (scale >= 1.0) ? cv::INTER_CUBIC : cv::INTER_AREA);
+        }
+    }
+
+    // ------------------------------------------------------------
+    // Super8 post effects on fixed-scale image
     // ------------------------------------------------------------
     applySuper8LightLeak(imgBGR);
     applySuper8Grain(imgBGR);
@@ -852,8 +869,11 @@ void DevelopThread::applySuper8Grain(cv::Mat &imgBgr)
     // ---- Grain character tuning ----
     // Scale noise size a bit with resolution
     const float resScale = std::sqrt((w * h) / (640.0f * 480.0f)); // 1.0 around VGA
-    int coarseW = std::max(1, int(std::round(0.65f * resScale)));
-    int coarseH = std::max(1, int(std::round(0.65f * resScale)));
+  //  int coarseW = std::max(1, int(std::round(0.65f * resScale)));
+  //  int coarseH = std::max(1, int(std::round(0.65f * resScale)));
+    int coarseW = std::max(1, int(std::round(1.25f * resScale)));
+    int coarseH = std::max(1, int(std::round(1.25f * resScale)));
+
 
     // Base amplitude
     // amount=1 -> still subtle; tune up/down here if needed
@@ -1298,7 +1318,7 @@ void DevelopThread::applyScratches(cv::Mat &imgBgr, int frameIndex)
         k = std::clamp(k * breathe, 0.0f, 1.0f);
 
         // Occasionally a bluish scratch (rare)
-        const bool bluish = (rng.uniform(0, 100) < 50);
+        const bool bluish = (rng.uniform(0, 100) < 20);
 
         // --- variable continuous length (no dashes) ---
         const float minLenFrac = 0.40f; // 40% of frame height
@@ -1348,8 +1368,8 @@ void DevelopThread::applyScratches(cv::Mat &imgBgr, int frameIndex)
     const float blackGain = 0.85f;  // overall darkness
 
     // More blue-green / cyan emulsion-damage look
-    const float cyanTint  = 0.7f;  // total tint strength
-    const float cyanB     = 1.00f;  // strong blue
+    const float cyanTint  = 0.9f;  // total tint strength
+    const float cyanB     = 1.20f;  // strong blue
     const float cyanG     = 0.72f;  // much more green than before
     const float cyanR     = 0.03f;  // keep red very low
 
@@ -1388,15 +1408,12 @@ void DevelopThread::applyScratches(cv::Mat &imgBgr, int frameIndex)
 
 void DevelopThread::drawSoftDust(cv::Mat& f32bgr, int cx, int cy, float radiusPx, float delta, float maxVal)
 {
-    // This version makes dust less "perfect circle":
-    // - elliptic gaussian (different sigmaX/sigmaY)
-    // - random rotation
-    // - slight "lumpiness" modulation
-    //
-    // NOTE: delta can be negative (dark) or positive (bright halo)
+    // Irregular dust blob:
+    // - NOT circular / elliptical
+    // - sharper edge than gaussian dust
+    // - still slightly soft/organic
+    // - deterministic per (cx,cy)
 
-    // We need a deterministic pseudo-random but we don't have rng here.
-    // So derive a tiny hash from position to vary shape consistently.
     auto hash01 = [](int x, int y, int k) -> float {
         uint32_t h = uint32_t(x) * 374761393u + uint32_t(y) * 668265263u + uint32_t(k) * 2246822519u;
         h = (h ^ (h >> 13)) * 1274126177u;
@@ -1407,19 +1424,37 @@ void DevelopThread::drawSoftDust(cv::Mat& f32bgr, int cx, int cy, float radiusPx
     const float uA = hash01(cx, cy, 1);
     const float uB = hash01(cx, cy, 2);
     const float uC = hash01(cx, cy, 3);
+    const float uD = hash01(cx, cy, 4);
+    const float uE = hash01(cx, cy, 5);
+    const float uF = hash01(cx, cy, 6);
 
-    // Ellipse axes
-    float sx = std::max(0.16f, radiusPx * (0.48f + 0.62f * uA));
-    float sy = std::max(0.16f, radiusPx * (0.48f + 0.62f * uB));
+    // Base radius: keep roughly similar size to what you already had
+    const float baseR = std::max(0.45f, radiusPx * (0.90f + 0.30f * uA));
 
-    // Rotation angle [0..2pi)
-    const float ang = 6.28318530718f * uC;
-    const float ca = std::cos(ang);
-    const float sa = std::sin(ang);
+    // Irregular contour parameters
+    const float phase1 = 6.28318530718f * uB;
+    const float phase2 = 6.28318530718f * uC;
+    const float phase3 = 6.28318530718f * uD;
 
-    // Kernel radius based on max axis
-    const float rMax = std::max(sx, sy);
-    const int rad = int(std::ceil(rMax * 3.0f));
+    const int f1 = 2 + int(2.0f * uE); // 2..3
+    const int f2 = 4 + int(3.0f * uF); // 4..6
+    const int f3 = 7 + int(2.0f * uA); // 7..8
+
+    // How irregular the outer contour is
+    const float irregularAmp1 = 0.22f;
+    const float irregularAmp2 = 0.12f;
+    const float irregularAmp3 = 0.07f;
+
+    // Slight directional asymmetry so it doesn't look centered/perfect
+    const float biasAng = 6.28318530718f * hash01(cx, cy, 7);
+    const float biasAmp = 0.14f + 0.10f * hash01(cx, cy, 8);
+
+    // Sharper edge control:
+    // smaller = sharper edge
+    const float edgeSoft = 0.22f + 0.06f * hash01(cx, cy, 9);
+
+    // Kernel radius
+    const int rad = int(std::ceil(baseR * 2.8f));
 
     for (int dy = -rad; dy <= rad; ++dy) {
         const int y = cy + dy;
@@ -1429,56 +1464,154 @@ void DevelopThread::drawSoftDust(cv::Mat& f32bgr, int cx, int cy, float radiusPx
             const int x = cx + dx;
             if ((unsigned)x >= (unsigned)f32bgr.cols) continue;
 
-            // rotate (dx,dy) into ellipse space
-            const float rx = ca * dx + sa * dy;
-            const float ry = -sa * dx + ca * dy;
+            const float fx = float(dx);
+            const float fy = float(dy);
 
-            const float ex = (rx * rx) / (2.0f * sx * sx);
-            const float ey = (ry * ry) / (2.0f * sy * sy);
+            const float r = std::sqrt(fx * fx + fy * fy);
+            if (r > baseR * 1.9f)
+                continue;
 
-            float w = std::exp(-(ex + ey));
+            const float theta = std::atan2(fy, fx);
 
-            // "Lumpiness": modulate weight a bit so it isn't perfectly smooth
-            // Keep subtle so it still looks like soft dust, not noise.
-            const float n = hash01(x, y, 9);              // stable per-pixel
-            w *= (0.85f + 0.30f * n);
+            // Irregular "potato/blob" contour
+            float shapeR = baseR;
+            shapeR *= (1.0f
+                       + irregularAmp1 * std::sin(float(f1) * theta + phase1)
+                       + irregularAmp2 * std::sin(float(f2) * theta + phase2)
+                       + irregularAmp3 * std::sin(float(f3) * theta + phase3));
+
+            // Directional bias so shape is not centered/perfect
+            shapeR *= (1.0f + biasAmp * std::cos(theta - biasAng));
+
+            // Stable per-pixel micro-variation
+            const float n = hash01(x, y, 10);
+            shapeR *= (0.95f + 0.12f * n);
+
+            if (shapeR < 0.25f)
+                shapeR = 0.25f;
+
+            // Normalized distance to irregular contour
+            const float q = r / shapeR;
+
+            float w = 0.0f;
+
+            if (q <= 1.0f) {
+                // Inside blob: mostly solid but with mild center emphasis
+                const float core = 1.0f - 0.18f * q * q;
+                w = core;
+            } else if (q <= 1.0f + edgeSoft) {
+                // Short transition band for sharper edge
+                const float t = (q - 1.0f) / edgeSoft; // 0..1
+                const float fall = 1.0f - t;
+                w = fall * fall * (1.0f - 0.25f * t);
+            } else {
+                continue;
+            }
+
+            // subtle lumpiness, but much less "blur bubble" feel
+            w *= (0.92f + 0.16f * n);
+
+            if (w <= 0.0005f)
+                continue;
 
             cv::Vec3f& p = f32bgr.at<cv::Vec3f>(y, x);
 
-            // If delta is negative (dark dust), don't "ink" to black.
-            // Scale the darkening by local brightness so it behaves more like attenuation.
-            // If delta is positive (bright pinholes/halo), keep unchanged.
             float d = delta * w;
+
+            // Dark dust behaves like attenuation, not pure ink
             if (d < 0.0f) {
-                const float lum = (p[0] + p[1] + p[2]) / (3.0f * maxVal);   // 0..1
-                const float k   = 0.25f + 0.75f * lum;                     // 0.25..1.0
+                const float lum = (p[0] + p[1] + p[2]) / (3.0f * maxVal); // 0..1
+                const float k   = 0.25f + 0.75f * lum;                    // 0.25..1.0
                 d *= k;
             }
 
             p[0] = std::clamp(p[0] + d, 0.0f, maxVal);
             p[1] = std::clamp(p[1] + d, 0.0f, maxVal);
             p[2] = std::clamp(p[2] + d, 0.0f, maxVal);
-
         }
     }
 }
 
-static inline void drawDustFiber(cv::Mat& f32bgr, int x0, int y0, int len, float angleRad, float delta, float maxVal)
+static inline void drawDustFiber(cv::Mat& f32bgr,
+                                 int x0, int y0,
+                                 int len,
+                                 float angleRad,
+                                 float delta,
+                                 float maxVal)
 {
+    auto hash01 = [](int x, int y, int k) -> float {
+        uint32_t h = uint32_t(x) * 374761393u + uint32_t(y) * 668265263u + uint32_t(k) * 2246822519u;
+        h = (h ^ (h >> 13)) * 1274126177u;
+        h ^= (h >> 16);
+        return (h & 0x00FFFFFF) / float(0x01000000); // [0,1)
+    };
+
+    const float u0 = hash01(x0, y0, 11);
+    const float u1 = hash01(x0, y0, 12);
+    const float u2 = hash01(x0, y0, 13);
+    const float u3 = hash01(x0, y0, 14);
+
     const float ca = std::cos(angleRad);
     const float sa = std::sin(angleRad);
 
-    // Draw a short soft line (len 2..10 px)
-    for (int i = 0; i < len; ++i) {
-        int x = int(std::round(x0 + ca * i));
-        int y = int(std::round(y0 + sa * i));
-        if ((unsigned)x >= (unsigned)f32bgr.cols || (unsigned)y >= (unsigned)f32bgr.rows) continue;
+    // Hair shape
+    const float phase   = 6.28318530718f * u0;
+    const float bendAmp = 0.45f + 1.20f * u1;   // visible but still subtle curvature
+    const float bendF   = 0.7f  + 1.0f  * u2;   // gentle bend frequency
 
-        // small soft stamp per segment
-        cv::Vec3f& p = f32bgr.at<cv::Vec3f>(y, x);
-        p[0] = std::clamp(p[0] + delta, 0.0f, maxVal);
-        p[1] = std::clamp(p[1] + delta, 0.0f, maxVal);
-        p[2] = std::clamp(p[2] + delta, 0.0f, maxVal);
+    // Mostly 1 px, sometimes subtly 2 px in the thicker middle section
+   // const int maxHalfThick = (u3 < 0.28f) ? 1 : 0;
+    const int maxHalfThick = (u3 < 0.18f) ? 2 : ((u3 < 0.50f) ? 1 : 0);
+
+    for (int i = 0; i < len; ++i) {
+        const float t = (len > 1) ? float(i) / float(len - 1) : 0.0f;
+
+        // Base straight direction
+        float xf = x0 + ca * i;
+        float yf = y0 + sa * i;
+
+        // Perpendicular vector
+        const float px = -sa;
+        const float py =  ca;
+
+        // Curvature strongest in the middle, weaker at the ends
+        const float env  = std::sin(3.14159265f * t);
+        const float bend = bendAmp * env * std::sin((6.28318530718f * bendF * t) + phase);
+
+        xf += px * bend;
+        yf += py * bend;
+
+        const int x = int(std::round(xf));
+        const int y = int(std::round(yf));
+
+        if ((unsigned)x >= (unsigned)f32bgr.cols || (unsigned)y >= (unsigned)f32bgr.rows)
+            continue;
+
+        // Taper ends: thicker only near the middle
+        int halfThick = 0;
+        if (maxHalfThick > 0 && env > 0.45f)
+            halfThick = 1;
+
+        // Slight strength taper toward the ends
+        const float segK = 0.65f + 0.35f * env;
+
+        for (int oy = -halfThick; oy <= halfThick; ++oy) {
+            const int yy = y + oy;
+            if ((unsigned)yy >= (unsigned)f32bgr.rows) continue;
+
+            for (int ox = -halfThick; ox <= halfThick; ++ox) {
+                const int xx = x + ox;
+                if ((unsigned)xx >= (unsigned)f32bgr.cols) continue;
+
+                const float edgeK = (ox == 0 && oy == 0) ? 1.0f : 0.58f;
+                const float d = delta * segK * edgeK;
+
+                cv::Vec3f& p = f32bgr.at<cv::Vec3f>(yy, xx);
+                p[0] = std::clamp(p[0] + d, 0.0f, maxVal);
+                p[1] = std::clamp(p[1] + d, 0.0f, maxVal);
+                p[2] = std::clamp(p[2] + d, 0.0f, maxVal);
+            }
+        }
     }
 }
 
@@ -1515,30 +1648,35 @@ void DevelopThread::applyDust(cv::Mat& imgBgr, int frameIndex)
     std::uniform_real_distribution<float> u01(0.0f, 1.0f);
     std::uniform_real_distribution<float> angle01(0.0f, 6.28318530718f);
 
-    // Radius grows with slider, but not absurdly
-    std::uniform_real_distribution<float> radSmall(0.55f, 1.10f + 1.70f * amount);
-    std::uniform_real_distribution<float> radLarge(1.00f, 2.10f + 3.60f * amount);
+    // ------------------------------------------------------------
+    // FIXED size ranges (not slider-driven)
+    // small and large are clearly separated now
+    // ------------------------------------------------------------
+    std::uniform_real_distribution<float> radSmall(0.45f, 1.20f);
+    std::uniform_real_distribution<float> radLarge(2.40f, 6.50f);
+    std::uniform_real_distribution<float> radHuge(12.0f, 28.0f);  // occasional big blotches
 
-    // ---- Density model ----
-    // More specs as slider increases
+    // ------------------------------------------------------------
+    // Slider mainly controls AMOUNT
+    // ------------------------------------------------------------
     int count = int((double(w) * double(h) / 90000.0) * double(0.20f + 4.40f * amount));
     count = std::clamp(count, 0, 5000);
 
     // 50/50 bright vs dark
-    const float brightProb = 0.50f;
+    const float brightProb = 0.10f;
 
-    // Similar strength both ways
-    const float darkDeltaBase   = -0.26f * amount * maxVal;
-    const float brightDeltaBase =  0.22f * amount * maxVal;
+    // Keep your current intensity logic
+    const float darkDeltaBase   = -(0.2f + 0.10f * amount) * maxVal;
+    const float brightDeltaBase =  (0.2f + 0.10f * amount) * maxVal;
 
     std::uniform_real_distribution<float> darkScale(0.75f, 1.15f);
-    std::uniform_real_distribution<float> brightScale(0.75f, 1.10f);
+    std::uniform_real_distribution<float> brightScale(0.45f, 1.15f);
 
-    // More fibers/hairs when slider goes up
+    // More hairs as slider goes up, but lengths are fixed-range now
     int fiberCount = 0;
-    if (amount > 0.03f) {
-        fiberCount = int((w * h / 220000.0) * (0.25f + 4.50f * amount));
-        fiberCount = std::clamp(fiberCount, 0, 120);
+    if (amount > 0.02f) {
+        fiberCount = int((w * h / 320000.0) * (0.12f + 2.80f * amount));
+        fiberCount = std::clamp(fiberCount, 0, 60);
     }
 
     // Specks / blobs / blotches
@@ -1549,10 +1687,15 @@ void DevelopThread::applyDust(cv::Mat& imgBgr, int frameIndex)
 
         const bool bright = (u01(rng) < brightProb);
 
-        float delta = bright
-                          ? (brightDeltaBase * brightScale(rng))
-                          : (darkDeltaBase   * darkScale(rng));
+        const float delta = bright
+                                ? (brightDeltaBase * brightScale(rng))
+                                : (darkDeltaBase   * darkScale(rng));
 
+        // Type:
+        // 0 = small speck
+        // 1 = irregular medium blotch
+        // 2 = occasional huge blotch
+        // 3 = medium soft blob
         const float t = u01(rng);
 
         if (t < 0.58f)
@@ -1563,7 +1706,7 @@ void DevelopThread::applyDust(cv::Mat& imgBgr, int frameIndex)
         }
         else if (t < 0.86f)
         {
-            // irregular blotch made of a few overlapping blobs
+            // irregular medium blotch (cluster of blobs)
             const int n = 2 + int(u01(rng) * 3.0f); // 2..4 sub-blobs
             const float baseR = radLarge(rng);
 
@@ -1581,18 +1724,39 @@ void DevelopThread::applyDust(cv::Mat& imgBgr, int frameIndex)
                 drawSoftDust(f, bx, by, rr, dd, maxVal);
             }
         }
-        else
+        else if (t < 0.93f)
         {
-            // medium blob
+            // medium single blob
             const float r = radLarge(rng);
             drawSoftDust(f, x, y, r, delta, maxVal);
+        }
+        else
+        {
+            // rare big speck / big stain-like dust
+            const int n = 3 + int(u01(rng) * 4.0f); // 3..6 sub-blobs
+            const float baseR = radHuge(rng);
+
+            for (int k = 0; k < n; ++k)
+            {
+                const float a = angle01(rng);
+                const float d = (0.10f + 0.95f * u01(rng)) * baseR;
+
+                const int bx = int(std::round(x + std::cos(a) * d));
+                const int by = int(std::round(y + std::sin(a) * d));
+
+                const float rr = baseR * (0.40f + 0.70f * u01(rng));
+                const float dd = delta * (0.75f + 0.35f * u01(rng));
+
+                drawSoftDust(f, bx, by, rr, dd, maxVal);
+            }
         }
     }
 
     // Fibers / hairs
     if (fiberCount > 0)
     {
-        std::uniform_int_distribution<int> lenDist(4, int(10 + 34 * amount));
+        // fixed visible lengths; slider only affects how many
+        std::uniform_int_distribution<int> lenDist(8, 44);
         std::uniform_real_distribution<float> angDist(0.0f, 6.28318530718f);
 
         for (int i = 0; i < fiberCount; ++i)
